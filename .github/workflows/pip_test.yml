@@ -1,0 +1,24 @@
+name: Build
+on: push
+
+jobs:
+  build-pip_test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.6, 3.7, 3.8, 3.9]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+      - run: |
+          cargo run &
+          pip install -i http://localhost:9000/pypi/web/simple django
