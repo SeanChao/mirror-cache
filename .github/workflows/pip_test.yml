@@ -1,4 +1,4 @@
-name: Build
+name: PIP Test
 on: push
 
 jobs:
@@ -21,4 +21,4 @@ jobs:
           command: build
       - run: |
           cargo run &
-          pip install -i http://localhost:9000/pypi/web/simple django
+          ./scripts/pip_test.sh django http://localhost:9000/pypi/web/simple
