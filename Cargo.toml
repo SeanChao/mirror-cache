@@ -9,4 +9,6 @@ edition = "2018"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = "0.11"
+thiserror = "1.0"
 warp = "0.3"
+redis = { version = "0.20", features = ["aio", "tokio-comp"] }

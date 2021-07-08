@@ -6,7 +6,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: [3.6, 3.7, 3.8, 3.9]
+        python-version: [3.9]
+        node-version: [15.x]
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -21,4 +22,9 @@ jobs:
           command: build
       - run: |
           cargo run &
-          ./scripts/pip_test.sh django http://localhost:9000/pypi/web/simple
+          ./scripts/pip_test.sh torch http://localhost:9000/pypi/web/simple
+      - name: mirror test
+        continue-on-error: true
+        run: |
+          npm install -g zx
+          zx ./scripts/pip_test.mjs
