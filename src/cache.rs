@@ -1,10 +1,16 @@
-#[allow(dead_code)]
-pub struct CacheConfig {
+use crate::util;
+
+/**
+ * Cache holds static config for the cache.
+ */
+#[derive(Clone, PartialEq, Hash)]
+pub struct Cache {
 	root_dir: String,
+	size_limit: u64,
 }
 
 #[allow(dead_code)]
-impl CacheConfig {
+impl Cache {
 	pub fn cache_path(self, path: &str) -> String {
 		format!("{}/{}", self.root_dir, path)
 	}
@@ -14,6 +20,7 @@ impl CacheConfig {
 pub struct CacheEntry {
 	pub valid: bool,
 	pub path: String,
+	pub atime: i64, // last access timestamp
 }
 
 impl CacheEntry {
@@ -21,13 +28,15 @@ impl CacheEntry {
 		CacheEntry {
 			path: path.to_string(),
 			valid: true,
+			atime: util::now(),
 		}
 	}
 
-	pub fn to_redis_multiple_fields(&self) -> Vec<(&str, &str)> {
-		let mut vec: Vec<(&str, &str)> = Vec::new();
-		vec.push(("valid", if self.valid { "1" } else { "0" }));
-		vec.push(("path", &self.path));
-		vec
+	pub fn to_redis_multiple_fields(&self) -> Vec<(&str, String)> {
+		vec![
+			("valid", String::from(if self.valid { "1" } else { "0" })),
+			("path", self.path.clone()),
+			("atime", self.atime.to_string()),
+		]
 	}
 }

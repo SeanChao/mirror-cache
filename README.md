@@ -3,6 +3,6 @@
 ## Getting Started
 
 ```sh
-docker run --network host redis
+docker run -d --network host redis
 cargo run
 ```

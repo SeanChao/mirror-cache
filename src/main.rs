@@ -1,5 +1,6 @@
 mod cache;
 mod error;
+mod util;
 
 #[tokio::main]
 async fn main() {
@@ -11,8 +12,10 @@ async fn main() {
 
 mod filters {
     use super::handlers;
+    use crate::cache::Cache;
     use std::convert::Infallible;
     use warp::Filter;
+
     type Client = redis::Client;
 
     pub fn root(
@@ -35,6 +38,11 @@ mod filters {
             .and_then(handlers::get_pypi_pkg)
     }
 
+    #[allow(dead_code)]
+    fn with_cache(cache: Cache) -> impl Filter<Extract = (Cache,), Error = Infallible> + Clone {
+        warp::any().map(move || cache.clone())
+    }
+
     fn with_redis_client(
         client: redis::Client,
     ) -> impl Filter<Extract = (redis::Client,), Error = Infallible> + Clone {
@@ -45,6 +53,7 @@ mod filters {
 mod handlers {
     use super::models;
     use crate::cache::CacheEntry;
+    use crate::util;
     use reqwest::ClientBuilder;
     use std::fs;
     use std::io::prelude::*;
@@ -93,6 +102,8 @@ mod handlers {
         if let Some(cache_entry) = cache_result {
             // cache hit
             println!("cache hit");
+            // update cache entry in db
+            models::update_cache_entry_atime(&mut con, &fullpath, util::now()).await?;
             let cached_file_path = format!("cache/{}", cache_entry.path);
             println!("read file @{}", cached_file_path);
             let file_content = match fs::read(cached_file_path) {
@@ -162,6 +173,9 @@ mod models {
                 true
             },
             path: String::from(map.get("path").unwrap_or(&String::from(""))),
+            atime: String::from(map.get("atime").unwrap_or(&String::from("0")))
+                .parse::<i64>()
+                .unwrap_or(0),
         };
         Ok(Some(cache_entry))
     }
@@ -173,7 +187,21 @@ mod models {
     ) -> Result<String> {
         let kv_array = entry.to_redis_multiple_fields();
         match con
-            .hset_multiple::<&str, &str, &str, String>(key, &kv_array)
+            .hset_multiple::<&str, &str, String, String>(key, &kv_array)
+            .await
+        {
+            Ok(s) => Ok(s),
+            Err(e) => Err(RedisCMDError(e)),
+        }
+    }
+
+    pub async fn update_cache_entry_atime(
+        con: &mut Connection,
+        key: &str,
+        atime: i64,
+    ) -> Result<i64> {
+        match con
+            .hset::<&str, &str, i64, i64>(key, "atime", atime)
             .await
         {
             Ok(s) => Ok(s),
