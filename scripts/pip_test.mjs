@@ -50,10 +50,15 @@ try {
 	const pkg1 = '0==0.0.0'
 	await $`${pip_install(pkg1, config.mirror)}`
 	// test - pip, cached removed
-	await $`rm -rf cache/8c/e6/83748ba1e232167de61f2bf31ec53f4b7acdd1ced52bdf3ea3366ea48132/0-0.0.0-py2.py3-none-any.whl`
+	await $`rm -rf cache/8c/e6/83748ba1e232167de61f2bf31ec53f4b7acdd1ced52bdf3ea3366ea48132/0-0.0.0-py2.py3-none-any.whl` // size = 1992
 	await $`${pip_install(pkg1, config.mirror)}`
 	// test - pip, cached
 	await $`${pip_install(pkg1, config.mirror)}`
+	// end tests
+
+	// begin tests
+	const targets = ["urllib3", "botocore", "six", "idna", "requests", "boto3", "certifi", "chardet", "setuptools", "awscli", "python-dateutil", "s3transfer", "pyyaml", "pip", "typing-extensions"]
+	await Promise.all(targets.map(e => $`${pip_install(e, config.mirror)}`));
 	// end tests
 } catch (p) {
 	console.log(p);

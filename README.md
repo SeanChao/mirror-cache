@@ -3,6 +3,8 @@
 ## Getting Started
 
 ```sh
-docker run -d --network host redis
-cargo run
+# run the server
+make redis && make run
+# clean up
+make clean
 ```
