@@ -13,7 +13,6 @@ function pip_install(name, proxy) {
 	--disable-pip-version-check \
 	--retries 0 \
 	--no-cache-dir \
-	-v \
 	${name}`
 }
 

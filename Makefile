@@ -22,7 +22,11 @@ redis:
 
 redis_cli:
 	docker run -it --network host --rm redis redis-cli
-k
+
+redis_dump:
+	docker run -it --network host --rm redis redis-cli get total_size
+	docker run -it --network host --rm redis redis-cli zrange cache_keys 0 -1 WITHSCORES
+
 clean:
 	rm -rf cache/* 
 	docker stop redis_dev || return 0
