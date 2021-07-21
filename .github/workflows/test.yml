@@ -1,8 +1,8 @@
-name: PIP Test
+name: Test
 on: push
 
 jobs:
-  build-pip_test:
+  build-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -25,13 +25,16 @@ jobs:
         with:
           command: build
       - run: |
-          docker run -d --name redis_test --network host --rm redis
+          make test
+      - run: |
+          make redis
           cargo run &
           ./scripts/pip_test.sh django http://localhost:9000/pypi/web/simple
-          docker stop redis_test
+          make redis_stop
       - name: mirror test
-        continue-on-error: true
         run: |
           npm install -g zx
+          make redis
           cargo run &
           zx ./scripts/pip_test.mjs
+          make redis_stop

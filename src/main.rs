@@ -79,7 +79,7 @@ mod handlers {
         let fullpath = format!("{}/{}/{}/{}", path, path2, path3, path4);
         println!("GET pypi-pkg: {}", &fullpath);
 
-        if let Some(cached_entry) = cache.get(fullpath.clone()) {
+        if let Some(cached_entry) = cache.get(&fullpath) {
             let bytes = cached_entry;
             return Ok(Response::builder().body(bytes));
         }
@@ -93,7 +93,6 @@ mod handlers {
             Ok(response) => {
                 let content_size = response.content_length().unwrap();
                 println!("fetched {}", content_size);
-                // cache to local filesystem
                 let resp_bytes = response.bytes().await.unwrap();
                 let data_to_write = resp_bytes.to_vec();
                 cache.put(&fullpath, data_to_write.clone());

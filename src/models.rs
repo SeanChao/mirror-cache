@@ -51,7 +51,7 @@ pub fn set_cache_entry(
     entry: &CacheEntry<LruCacheMetadata, String, ()>,
 ) -> Result<()> {
     let kv_array = entry.to_redis_multiple_fields();
-    let tx_result = redis::transaction(con, &[key, "total_size"], |con, pipe| {
+    let tx_result = redis::transaction(con, &[key, "total_size", "cache_keys"], |con, pipe| {
         pipe.incr("total_size", entry.metadata.size)
             .hset_multiple::<&str, &str, String>(key, &kv_array)
             .ignore()
@@ -63,8 +63,13 @@ pub fn set_cache_entry(
 }
 
 pub fn update_cache_entry_atime(con: &mut SyncConnection, key: &str, atime: i64) -> Result<i64> {
-    match con.hset::<&str, &str, i64, i64>(key, "atime", atime) {
-        Ok(s) => Ok(s),
+    match redis::pipe()
+        .atomic()
+        .hset(key, "atime", atime)
+        .zadd("cache_keys", key, atime)
+        .query::<(i64, i64)>(con)
+    {
+        Ok(_) => Ok(atime),
         Err(e) => Err(RedisCMDError(e)),
     }
 }

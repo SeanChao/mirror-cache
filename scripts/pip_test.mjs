@@ -40,7 +40,6 @@ const redis_container_name = 'redis_test_' + Math.floor(Math.random() * 1000);
 let exitCode = 0;
 try {
 	await Promise.all([
-		$`docker run --name ${redis_container_name} --network host --rm -d redis`,
 		$`docker pull python`
 	])
 	// begin tests
@@ -64,7 +63,6 @@ try {
 	exitCode = p.exitCode;
 } finally {
 	console.log('Tests finished, cleaning up...')
-	await $`docker stop ${redis_container_name}`
 }
 
 await $`exit ${exitCode}`
