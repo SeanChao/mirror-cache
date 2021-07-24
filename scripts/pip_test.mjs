@@ -1,33 +1,7 @@
 #!/bin/zx
 $.quote = v => v
 
-function pip_install(name, proxy) {
-	return `docker \
-	run \
-	--rm \
-	--network host \
-	python \
-	python -m \
-	pip install \
-	-i ${proxy} \
-	--disable-pip-version-check \
-	--retries 0 \
-	--no-cache-dir \
-	${name}`
-}
-
-function db_reset() {
-	return `${redis_command('FLUSHALL')}`
-}
-
-function redis_command(cmd) {
-	return `docker run --rm --network host redis redis-cli '${cmd}'`
-}
-
-
-function clean() {
-	return db_reset();
-}
+import { pip_install, clean } from './lib.mjs'
 
 const config = {
 	'exec': 'cargo run',
@@ -36,7 +10,6 @@ const config = {
 }
 
 
-const redis_container_name = 'redis_test_' + Math.floor(Math.random() * 1000);
 let exitCode = 0;
 try {
 	await Promise.all([

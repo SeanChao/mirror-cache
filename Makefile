@@ -1,3 +1,5 @@
+REDIS_OPTS=-v ${PWD}/redis.conf:/conf/redis.conf --rm
+
 build:
 	cargo build
 
@@ -25,13 +27,13 @@ dev_deps:
 	yarn global add zx
 
 redis:
-	docker run --name redis_dev -d --network host --rm redis
+	docker run $(REDIS_OPTS) --name redis_dev -d --network host --rm redis /conf/redis.conf
 
 redis_stop:
 	docker stop redis_dev
 
 redis_test:
-	docker run --name redis_test -d -p 3001:6379 --rm redis
+	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
 
 redis_cli:
 	docker run -it --network host --rm redis redis-cli
@@ -51,3 +53,7 @@ clean:
 	rm -rf cache/* 
 	docker stop redis_dev || return 0
 	docker stop redis_test || return 0
+
+pip_test:
+	zx ./scripts/pip_test.mjs
+	zx ./scripts/concurrent.mjs
