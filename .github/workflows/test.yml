@@ -24,17 +24,14 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: build
-      - run: |
+      - name: Cargo Test
+        run: |
           make test
-      - run: |
-          make redis
-          cargo run &
-          ./scripts/pip_test.sh django http://localhost:9000/pypi/web/simple
-          make redis_stop
       - name: mirror test
         run: |
           npm install -g zx
           make redis
           cargo run &
-          zx ./scripts/pip_test.mjs
+          make pip_test
+          kill %1
           make redis_stop

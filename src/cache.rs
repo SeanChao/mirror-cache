@@ -139,6 +139,133 @@ impl CachePolicy for LruRedisCache {
     }
 }
 
+/**
+ *
+ * TtlRedisCache is a simple cache policy that expire an existing cache entry
+ * within the given TTL. The expiration is supported by redis.
+ */
+pub struct TtlRedisCache {
+    pub root_dir: String,
+    pub ttl: u64, // cache entry ttl in seconds
+    redis_client: redis::Client,
+}
+
+impl TtlRedisCache {
+    pub fn new(root_dir: &str, ttl: u64, redis_client: redis::Client) -> Self {
+        let cloned_client = redis_client.clone();
+        let cloned_root_dir = String::from(root_dir);
+        std::thread::spawn(move || {
+            println!("TTL expiration listener is created!");
+            loop {
+                let mut con = cloned_client.get_connection().unwrap();
+                let mut pubsub = con.as_pubsub();
+                // TODO: subscribe only current cache key pattern
+                match pubsub.psubscribe("__keyevent*__:expired") {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("Failed to psubscribe: {}", e);
+                        continue;
+                    }
+                }
+                loop {
+                    match pubsub.get_message() {
+                        Ok(msg) => {
+                            let payload: String = msg.get_payload().unwrap();
+                            let pkg_name = Self::from_redis_key(&payload);
+                            println!(
+                                "channel '{}': {}, pkg: {}",
+                                msg.get_channel_name(),
+                                payload,
+                                pkg_name
+                            );
+                            match fs::remove_file(Self::to_fs_path(&cloned_root_dir, &pkg_name)) {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    if e.kind() == std::io::ErrorKind::NotFound {
+                                        eprintln!("Failed to remove {}: {}", &pkg_name, e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to get_message: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            root_dir: String::from(root_dir),
+            ttl,
+            redis_client,
+        }
+    }
+
+    pub fn to_redis_key(root_dir: &str, name: &str) -> String {
+        format!("ttl_redis_cache/{}/{}", root_dir, name)
+    }
+
+    pub fn from_redis_key(key: &str) -> String {
+        String::from(util::split_dirs(key).1)
+    }
+
+    pub fn to_fs_path(root_dir: &str, name: &str) -> String {
+        format!("{}/{}", root_dir, name)
+    }
+}
+
+impl CachePolicy for TtlRedisCache {
+    fn put(&self, key: &str, entry: BytesArray) {
+        let redis_key = Self::to_redis_key(&self.root_dir, key);
+        let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
+        let data_to_write = entry;
+        let fs_path = Self::to_fs_path(&self.root_dir, &key);
+        let (parent_dirs, _cached_filename) = util::split_dirs(&fs_path);
+        fs::create_dir_all(parent_dirs).unwrap();
+        let mut f = fs::File::create(fs_path).unwrap();
+        f.write_all(&data_to_write).unwrap();
+        match models::set(&mut sync_con, &redis_key, "") {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("set cache entry for {} failed: {}", key, e);
+            }
+        }
+        match models::expire(&mut sync_con, &redis_key, self.ttl as usize) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("set cache entry ttl for {} failed: {}", key, e);
+            }
+        }
+        println!("CACHE SET {} TTL={}", &key, self.ttl);
+    }
+
+    fn get(&self, key: &str) -> Option<BytesArray> {
+        let redis_key = Self::to_redis_key(&self.root_dir, key);
+        let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
+        match models::get(&mut sync_con, &redis_key) {
+            Ok(res) => match res {
+                Some(_) => {
+                    let cached_file_path = Self::to_fs_path(&self.root_dir, &key);
+                    let file_content = match fs::read(cached_file_path) {
+                        Ok(data) => data,
+                        Err(_) => vec![],
+                    };
+                    if file_content.len() > 0 {
+                        println!("GET {} [HIT]", key);
+                        return Some(file_content);
+                    }
+                    None
+                }
+                None => None,
+            },
+            Err(e) => {
+                println!("get cache entry key={} failed: {}", key, e);
+                None
+            }
+        }
+    }
+}
+
 #[derive(Hash, Eq, PartialEq, Debug)]
 pub struct CacheEntry<Metadata, Key, Value> {
     pub metadata: Metadata,
