@@ -220,9 +220,10 @@ mod test {
         std::thread::sleep(std::time::Duration::from_millis(
             TEMP_TTL_DEFAULT * 1000 + 1000,
         ));
+        let fs_path = cache::TtlRedisCache::to_fs_path(TEMP_TTL_CACHE_PATH, pkg_name);
+        assert!(!std::path::Path::new(&fs_path).exists()); // cache file should be removed
         // hack local cache
         let data = "月がきれい";
-        let fs_path = cache::TtlRedisCache::to_fs_path(TEMP_TTL_CACHE_PATH, pkg_name);
         let (parents, _file) = util::split_dirs(&fs_path);
         fs::create_dir_all(parents).unwrap();
         fs::write(&fs_path, data).unwrap();
@@ -235,9 +236,5 @@ mod test {
         let resp_text = std::str::from_utf8(&resp_bytes).unwrap();
         assert!(resp_text.contains("Links for"));
         assert_ne!(resp_text, data);
-        std::thread::sleep(std::time::Duration::from_millis(
-            TEMP_TTL_DEFAULT * 1000 + 1000,
-        ));
-        assert!(!std::path::Path::new(&fs_path).exists()); // cache file should be removed
     }
 }
