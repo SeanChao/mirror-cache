@@ -116,6 +116,7 @@ mod tests {
         let key = "IkariShinji";
         let val = "Kaworu";
         set(&mut con, key, val).unwrap();
+        thread::sleep(std::time::Duration::from_millis(500));
         let val_actual = get(&mut con, key).unwrap().unwrap();
         assert_eq!(val_actual, val);
     }
