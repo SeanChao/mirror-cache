@@ -36,7 +36,10 @@ mod filters {
             super::TEMP_TTL_DEFAULT,
             redis_client.clone(),
         );
-        pypi_index(Arc::new(ttl_cache)).or(pypi_packages(Arc::new(lru_cache)))
+        let ttl_cache_conda = cache::TtlRedisCache::new("cache/conda", 5, redis_client.clone());
+        pypi_index(Arc::new(ttl_cache))
+            .or(pypi_packages(Arc::new(lru_cache)))
+            .or(anaconda_all(Arc::new(ttl_cache_conda)))
     }
 
     // GET /pypi/web/simple/:string
@@ -56,6 +59,17 @@ mod filters {
             .and(with_cache(cache))
             .and_then(handlers::get_pypi_pkg)
     }
+
+    // GET /anaconda/:repo/:arch/:filename
+    fn anaconda_all(
+        cache: Arc<impl CachePolicy>,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("anaconda" / String / String / String)
+            .and(with_cache(cache))
+            .and_then(handlers::get_anaconda)
+    }
+
+    // fn anaconda_
 
     fn with_cache(
         cache: Arc<impl CachePolicy>,
@@ -144,6 +158,39 @@ mod handlers {
             }
         }
     }
+
+    pub async fn get_anaconda(
+        channel: String,
+        arch: String,
+        filename: String,
+        cache: Arc<impl CachePolicy>,
+    ) -> Result<impl warp::Reply, Rejection> {
+        let cache_key = format!("anaconda/{}/{}/{}", channel, arch, filename);
+        if let Some(cached_entry) = cache.get(&cache_key) {
+            let bytes = warp::hyper::body::Bytes::from(cached_entry);
+            println!("🎯 [GET] /anaconda/{}/{}/{}", channel, arch, filename);
+            return Ok(Response::builder().body(bytes));
+        }
+        println!("↗️ [GET] /anaconda/{}/{}/{}", channel, arch, filename);
+        let upstream = format!(
+            "https://conda-static.anaconda.org/{}/{}/{}",
+            channel, arch, filename
+        );
+        let client = ClientBuilder::new().build().unwrap();
+        let resp = client.get(&upstream).send().await;
+        match resp {
+            Ok(response) => {
+                let resp_bytes = response.bytes().await.unwrap();
+                let data_to_write = resp_bytes.to_vec();
+                cache.put(&cache_key, data_to_write.clone());
+                Ok(Response::builder().body(resp_bytes))
+            }
+            Err(err) => {
+                eprintln!("{:?}", err);
+                Err(warp::reject::reject())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,7 +269,7 @@ mod test {
         ));
         let fs_path = cache::TtlRedisCache::to_fs_path(TEMP_TTL_CACHE_PATH, pkg_name);
         assert!(!std::path::Path::new(&fs_path).exists()); // cache file should be removed
-        // hack local cache
+                                                           // hack local cache
         let data = "月がきれい";
         let (parents, _file) = util::split_dirs(&fs_path);
         fs::create_dir_all(parents).unwrap();

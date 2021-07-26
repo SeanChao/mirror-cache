@@ -171,18 +171,19 @@ impl TtlRedisCache {
                     match pubsub.get_message() {
                         Ok(msg) => {
                             let payload: String = msg.get_payload().unwrap();
-                            let pkg_name = Self::from_redis_key(&payload);
+                            let cache_key = Self::from_redis_key(&cloned_root_dir, &payload);
                             println!(
                                 "channel '{}': {}, pkg: {}",
                                 msg.get_channel_name(),
                                 payload,
-                                pkg_name
+                                cache_key
                             );
-                            match fs::remove_file(Self::to_fs_path(&cloned_root_dir, &pkg_name)) {
+                            let file_path = Self::to_fs_path(&cloned_root_dir, &cache_key);
+                            match fs::remove_file(&file_path) {
                                 Ok(_) => {}
                                 Err(e) => {
                                     if e.kind() == std::io::ErrorKind::NotFound {
-                                        eprintln!("Failed to remove {}: {}", &pkg_name, e);
+                                        eprintln!("Failed to remove {}: {}", &file_path, e);
                                     }
                                 }
                             }
@@ -201,16 +202,15 @@ impl TtlRedisCache {
         }
     }
 
-    pub fn to_redis_key(root_dir: &str, name: &str) -> String {
-        format!("ttl_redis_cache/{}/{}", root_dir, name)
+    pub fn to_redis_key(root_dir: &str, cache_key: &str) -> String {
+        format!("ttl_redis_cache/{}/{}", root_dir, cache_key)
+    }
+    pub fn from_redis_key(root_dir: &str, key: &str) -> String {
+        String::from(&key[16 + root_dir.len() + 1..])
     }
 
-    pub fn from_redis_key(key: &str) -> String {
-        String::from(util::split_dirs(key).1)
-    }
-
-    pub fn to_fs_path(root_dir: &str, name: &str) -> String {
-        format!("{}/{}", root_dir, name)
+    pub fn to_fs_path(root_dir: &str, cache_key: &str) -> String {
+        format!("{}/{}", root_dir, cache_key)
     }
 }
 
