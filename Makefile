@@ -8,7 +8,10 @@ run:
 
 test:
 	docker run --name redis_test -d -p 3001:6379 --rm redis
-	cargo test; docker stop redis_test
+	cargo test
+	EXIT_CODE=$$?
+	docker stop redis_test
+	exit $$EXIT_CODE
 
 dev:
 	cargo watch -d 2 -i cache -x run
@@ -56,4 +59,5 @@ clean:
 
 pip_test:
 	zx ./scripts/pip_test.mjs
+	zx ./scripts/conda_test.mjs
 	zx ./scripts/concurrent.mjs

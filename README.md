@@ -1,5 +1,7 @@
 # MirrorCache
 
+A smart reverse proxy for mirror sites with different cache policies.
+
 ## Getting Started
 
 ```sh
@@ -9,10 +11,6 @@ make redis && make run
 make clean
 ```
 
-## Configuration
+We currently support [PyPI](https://pypi.org/) and [Anaconda](anaconda.com).
 
-If you want to use `TtlRedisCache`, please enable redis keyspace events notification, see [redis.conf](redis.conf) for reference.
-
-## Development Documentation
-
-See [docs](docs/README.md).
+See [docs](docs/README.md) for more information.

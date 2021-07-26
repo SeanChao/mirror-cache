@@ -13,6 +13,20 @@ export function pip_install(name, proxy) {
 	${name}`
 }
 
+export function conda_install(name, proxy) {
+	return `docker \
+	run \
+	--rm \
+	--network host \
+	continuumio/miniconda3 conda \
+	install \
+	-v \
+	-y \
+	-c ${proxy} \
+	${name}
+	`
+}
+
 export function db_reset() {
 	return `${redis_command('FLUSHALL')}`
 }
