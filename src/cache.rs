@@ -3,8 +3,10 @@ use std::fs;
 use std::io::prelude::*;
 use std::marker::Send;
 use std::vec::Vec;
+use tokio::sync::mpsc;
 
 use crate::models;
+use crate::task::DownloadTask;
 use crate::util;
 
 pub type BytesArray = Vec<u8>;
@@ -14,20 +16,31 @@ pub trait CachePolicy: Sync + Send {
     fn get(&self, key: &str) -> Option<BytesArray>;
 }
 
+pub trait DownloadQueue: Sync + Send {
+    fn get_sender(&self) -> mpsc::Sender<DownloadTask>;
+}
+
 #[derive(Clone)]
 pub struct LruRedisCache {
     root_dir: String,
     pub size_limit: u64, // cache size in bytes(B)
     redis_client: redis::Client,
+    chan_tx: Option<mpsc::Sender<DownloadTask>>,
 }
 
 impl LruRedisCache {
-    pub fn new(root_dir: &str, size_limit: u64, redis_client: redis::Client) -> Self {
+    pub fn new(
+        root_dir: &str,
+        size_limit: u64,
+        redis_client: redis::Client,
+        chan_tx: Option<mpsc::Sender<DownloadTask>>,
+    ) -> Self {
         println!("LRU Redis Cache init: size_limit={}", size_limit);
         Self {
             root_dir: String::from(root_dir),
-            size_limit: size_limit,
-            redis_client: redis_client,
+            size_limit,
+            redis_client,
+            chan_tx,
         }
     }
 }
@@ -139,6 +152,12 @@ impl CachePolicy for LruRedisCache {
     }
 }
 
+impl DownloadQueue for LruRedisCache {
+    fn get_sender(&self) -> mpsc::Sender<DownloadTask> {
+        self.chan_tx.as_ref().unwrap().clone()
+    }
+}
+
 /**
  *
  * TtlRedisCache is a simple cache policy that expire an existing cache entry
@@ -183,7 +202,7 @@ impl TtlRedisCache {
                                 Ok(_) => {}
                                 Err(e) => {
                                     if e.kind() == std::io::ErrorKind::NotFound {
-                                        eprintln!("Failed to remove {}: {}", &file_path, e);
+                                        // eprintln!("Failed to remove {}: {}", &file_path, e);
                                     }
                                 }
                             }
@@ -355,12 +374,18 @@ mod tests {
         }
     }
 
+    macro_rules! new_lru_redis_cache {
+        ($dir: expr, $size: expr, $redis_client: ident ) => {
+            LruRedisCache::new($dir, $size, $redis_client, None)
+        };
+    }
+
     #[test]
     #[serial]
     fn test_cache_entry_success() {
         flush_cache();
         let redis_client = new_redis_client();
-        let lru_cache = LruRedisCache::new(TEST_CACHE_DIR, 16 * 1024 * 1024, redis_client);
+        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 16 * 1024 * 1024, redis_client);
         let redis_tester_client = new_redis_client();
         let key = "answer";
         let cached_data = vec![42];
@@ -381,7 +406,7 @@ mod tests {
         flush_cache();
         let redis_client = new_redis_client();
         let redis_client_tester = new_redis_client();
-        let lru_cache = LruRedisCache::new(TEST_CACHE_DIR, 16, redis_client);
+        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 16, redis_client);
         lru_cache.put("tsu_ki", vec![0; 5]);
         let mut con = redis_client_tester.get_connection().unwrap();
         let total_size_actual: u64 = get_cache_size(&mut con);
@@ -430,7 +455,7 @@ mod tests {
         let redis_client = new_redis_client();
         let redis_client_tester = new_redis_client();
         let mut con = redis_client_tester.get_connection().unwrap();
-        let lru_cache = LruRedisCache::new(TEST_CACHE_DIR, 3, redis_client);
+        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client);
         let key1 = "1二号去听经";
         let key2 = "2晚上住旅店";
         let key3 = "3三号去餐厅";
@@ -466,7 +491,7 @@ mod tests {
         let redis_client = new_redis_client();
         let redis_client_tester = new_redis_client();
         let mut con = redis_client_tester.get_connection().unwrap();
-        let lru_cache = LruRedisCache::new(TEST_CACHE_DIR, 3, redis_client);
+        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client);
         let key = "Shire";
         lru_cache.put(key, vec![0]);
         let atime_before: i64 = con.hget(key, "atime").unwrap();

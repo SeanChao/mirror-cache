@@ -11,6 +11,8 @@ pub enum Error {
     RedisCMDError(redis::RedisError),
     #[error("error creating Redis client: {0}")]
     RedisClientError(redis::RedisError),
+    #[error("error downloading task: {0}")]
+    RequestError(reqwest::Error)
 }
 
 impl warp::reject::Reject for Error {}
