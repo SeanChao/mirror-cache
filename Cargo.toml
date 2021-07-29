@@ -8,11 +8,12 @@ edition = "2018"
 
 [dependencies]
 chrono = "0.4"
+futures = "0.3"
 tokio = { version = "1", features = ["full"] }
+redis = { version = "0.21", features = ["aio", "tokio-comp"] }
 reqwest = "0.11"
 thiserror = "1.0"
 warp = "0.3"
-redis = { version = "0.21", features = ["aio", "tokio-comp"] }
 
 [dev-dependencies]
 serial_test = "*"
