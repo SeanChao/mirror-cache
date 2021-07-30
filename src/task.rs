@@ -68,13 +68,19 @@ pub async fn task_recv(mut rx: mpsc::Receiver<DownloadTask>) {
                 println!("[Task] Finished downloading {}", &url);
             }
             {
-                if let Some(rx) = task_rx_map_sync_clone.lock().await.get(&url) {
-                    if let Some(result) = rx.borrow().clone() {
-                        let _ = task.resp.send(Ok(result));
+                if let Some(rx) = task_rx_map_sync_clone.lock().await.get_mut(&url) {
+                    if rx.changed().await.is_ok() {
+                        if let Some(result) = rx.borrow().clone() {
+                            let _ = task.resp.send(Ok(result));
+                        } else {
+                            let _ = task
+                                .resp
+                                .send(Err(DownloadTaskError(String::from("result is none"))));
+                        }
                     } else {
-                        let _ = task
-                            .resp
-                            .send(Err(DownloadTaskError(String::from("result is none"))));
+                        let _ = task.resp.send(Err(DownloadTaskError(String::from(
+                            "task response receiver error",
+                        ))));
                     }
                 }
             }
