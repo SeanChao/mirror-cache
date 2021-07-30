@@ -9,9 +9,7 @@ run:
 test:
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
 	cargo test
-	EXIT_CODE=$$?
 	docker stop redis_test
-	exit $$EXIT_CODE
 
 dev:
 	cargo watch -d 2 -i cache -x run

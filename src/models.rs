@@ -25,7 +25,7 @@ pub fn get_cache_entry(
     key: &str,
 ) -> Result<Option<CacheEntry<LruCacheMetadata, String, ()>>> {
     let map: HashMap<String, String> = con.hgetall(key)?;
-    println!("redis return {:?}", map);
+    // println!("redis return {:?}", map);
     if map.is_empty() {
         // not exist in cache
         return Ok(None);

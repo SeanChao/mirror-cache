@@ -11,6 +11,6 @@ make redis && make run
 make clean
 ```
 
-We currently support [PyPI](https://pypi.org/) and [Anaconda](anaconda.com).
+We currently support [PyPI](https://pypi.org/) and [Anaconda](https://anaconda.com).
 
 See [docs](docs/README.md) for more information.

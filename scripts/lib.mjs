@@ -8,7 +8,6 @@ export function pip_install(name, proxy) {
 	pip install \
 	-i ${proxy} \
 	--disable-pip-version-check \
-	--retries 0 \
 	--no-cache-dir \
 	${name}`
 }

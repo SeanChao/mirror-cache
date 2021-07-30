@@ -2,6 +2,7 @@ mod cache;
 mod config;
 mod error;
 mod models;
+mod task;
 mod util;
 
 #[tokio::main]
@@ -14,13 +15,15 @@ async fn main() {
 }
 
 static TEMP_TTL_DEFAULT: u64 = 5;
-static TEMP_TTL_CACHE_PATH: &str = "cache/ttl";
+static TEMP_TTL_CACHE_PATH: &str = "cache/pypi/web/simple";
 
 mod filters {
     use super::handlers;
     use crate::cache;
     use crate::cache::CachePolicy;
+    use crate::cache::DownloadQueue;
     use crate::config::Config;
+    use crate::task;
     use std::convert::Infallible;
     use std::sync::Arc;
     use warp::Filter;
@@ -28,9 +31,12 @@ mod filters {
     pub fn root(
         config: Config,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+        tokio::spawn(async move { task::task_recv(rx).await });
         let redis_client =
             redis::Client::open(config.redis_url).expect("failed to connect to redis");
-        let lru_cache = cache::LruRedisCache::new("cache", 16 * 1024 * 1024, redis_client.clone());
+        let lru_cache =
+            cache::LruRedisCache::new("cache", 16 * 1024 * 1024, redis_client.clone(), Some(tx));
         let ttl_cache = cache::TtlRedisCache::new(
             super::TEMP_TTL_CACHE_PATH,
             super::TEMP_TTL_DEFAULT,
@@ -53,10 +59,10 @@ mod filters {
 
     // GET /pypi/package/:string/:string/:string/:string
     fn pypi_packages(
-        cache: Arc<impl CachePolicy>,
+        cache: Arc<impl CachePolicy + DownloadQueue>,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         warp::path!("pypi" / "packages" / String / String / String / String)
-            .and(with_cache(cache))
+            .and(with_cache_download_queue(cache))
             .and_then(handlers::get_pypi_pkg)
     }
 
@@ -76,12 +82,23 @@ mod filters {
     ) -> impl Filter<Extract = (Arc<impl CachePolicy>,), Error = Infallible> + Clone {
         warp::any().map(move || cache.clone())
     }
+
+    fn with_cache_download_queue(
+        cache: Arc<impl CachePolicy + DownloadQueue>,
+    ) -> impl Filter<Extract = (Arc<impl CachePolicy + DownloadQueue>,), Error = Infallible> + Clone
+    {
+        warp::any().map(move || cache.clone())
+    }
 }
 
 mod handlers {
     use crate::cache::CachePolicy;
+    use crate::cache::DownloadQueue;
+    use crate::task::DownloadTask;
+
     use reqwest::ClientBuilder;
     use std::sync::Arc;
+    use tokio::sync::oneshot;
     use warp::{http::Response, Rejection};
 
     pub async fn get_pypi_index(
@@ -128,32 +145,46 @@ mod handlers {
         path2: String,
         path3: String,
         path4: String,
-        cache: Arc<impl CachePolicy>,
+        cache: Arc<impl CachePolicy + DownloadQueue>,
     ) -> Result<impl warp::Reply, Rejection> {
         let fullpath = format!("{}/{}/{}/{}", path, path2, path3, path4);
-        println!("GET pypi-pkg: {}", &fullpath);
 
         if let Some(cached_entry) = cache.get(&fullpath) {
             let bytes = cached_entry;
+            println!("🎯 GET pypi-pkg: {}", &fullpath);
             return Ok(Response::builder().body(bytes));
         }
         // cache miss
-        println!("cache miss");
+        println!("↗️ GET pypi-pkg: {}", &fullpath);
         let upstream = format!("https://files.pythonhosted.org/packages/{}", &fullpath);
-        let client = ClientBuilder::new().build().unwrap();
-        println!("GET {}", &upstream);
-        let resp = client.get(&upstream).send().await;
-        match resp {
-            Ok(response) => {
-                let content_size = response.content_length().unwrap();
-                println!("fetched {}", content_size);
-                let resp_bytes = response.bytes().await.unwrap();
-                let data_to_write = resp_bytes.to_vec();
-                cache.put(&fullpath, data_to_write.clone());
-                Ok(Response::builder().body(data_to_write))
+        let tx = cache.get_sender();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let task = DownloadTask {
+            url: upstream.clone(),
+            resp: resp_tx,
+        };
+        match tx.send(task).await {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("Failed to send download task: {}", e);
             }
+        };
+        let chan_resp = resp_rx.await;
+        match chan_resp {
+            Ok(response) => match response {
+                Ok(response) => {
+                    let resp_bytes = response;
+                    let data_to_write = resp_bytes.to_vec();
+                    cache.put(&fullpath, data_to_write.clone());
+                    Ok(Response::builder().body(data_to_write))
+                }
+                Err(e) => {
+                    eprintln!("\tError downloading task : {}", &e);
+                    Err(warp::reject::reject())
+                }
+            },
             Err(err) => {
-                println!("{:?}", err);
+                eprintln!("{:?}", err);
                 Err(warp::reject::reject())
             }
         }
