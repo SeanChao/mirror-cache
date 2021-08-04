@@ -1,6 +1,7 @@
-use thiserror::Error;
-
+use config::ConfigError;
 use redis::RedisError;
+use std::convert::From;
+use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Error, Debug)]
@@ -11,14 +12,24 @@ pub enum Error {
     RedisCMDError(redis::RedisError),
     #[error("error creating Redis client: {0}")]
     RedisClientError(redis::RedisError),
-    #[error("failed to download the task, internal error {0}")]
-    DownloadTaskError(String),
+    #[error("outbound request failed: {0}")]
+    RequestError(reqwest::Error),
+    #[error("{0}")]
+    ConfigDeserializeError(config::ConfigError),
+    #[error("invalid configuration: {0}")]
+    ConfigInvalid(String),
 }
 
 impl warp::reject::Reject for Error {}
 
-impl std::convert::From<RedisError> for Error {
+impl From<RedisError> for Error {
     fn from(e: RedisError) -> Error {
         return Error::RedisTypeError(e);
+    }
+}
+
+impl From<ConfigError> for Error {
+    fn from(e: ConfigError) -> Error {
+        return Error::ConfigDeserializeError(e);
     }
 }

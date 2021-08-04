@@ -45,6 +45,7 @@ pub fn get_cache_entry(
     Ok(Some(cache_entry))
 }
 
+// FIXME: do not update size when key exists
 pub fn set_cache_entry(
     con: &mut SyncConnection,
     key: &str,

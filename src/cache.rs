@@ -3,10 +3,8 @@ use std::fs;
 use std::io::prelude::*;
 use std::marker::Send;
 use std::vec::Vec;
-use tokio::sync::mpsc;
 
 use crate::models;
-use crate::task::DownloadTask;
 use crate::util;
 
 pub type BytesArray = Vec<u8>;
@@ -16,31 +14,23 @@ pub trait CachePolicy: Sync + Send {
     fn get(&self, key: &str) -> Option<BytesArray>;
 }
 
-pub trait DownloadQueue: Sync + Send {
-    fn get_sender(&self) -> mpsc::Sender<DownloadTask>;
-}
-
 #[derive(Clone)]
 pub struct LruRedisCache {
     root_dir: String,
     pub size_limit: u64, // cache size in bytes(B)
     redis_client: redis::Client,
-    chan_tx: Option<mpsc::Sender<DownloadTask>>,
 }
 
 impl LruRedisCache {
-    pub fn new(
-        root_dir: &str,
-        size_limit: u64,
-        redis_client: redis::Client,
-        chan_tx: Option<mpsc::Sender<DownloadTask>>,
-    ) -> Self {
-        println!("LRU Redis Cache init: size_limit={}", size_limit);
+    pub fn new(root_dir: &str, size_limit: u64, redis_client: redis::Client) -> Self {
+        println!(
+            "LRU Redis Cache init: size_limit={}, root_dir={}",
+            size_limit, root_dir
+        );
         Self {
             root_dir: String::from(root_dir),
             size_limit,
             redis_client,
-            chan_tx,
         }
     }
 }
@@ -149,12 +139,6 @@ impl CachePolicy for LruRedisCache {
         };
         println!("[MISS]");
         None
-    }
-}
-
-impl DownloadQueue for LruRedisCache {
-    fn get_sender(&self) -> mpsc::Sender<DownloadTask> {
-        self.chan_tx.as_ref().unwrap().clone()
     }
 }
 
@@ -322,6 +306,15 @@ impl CacheEntry<LruCacheMetadata, String, ()> {
     }
 }
 
+pub struct NoCache {}
+
+impl CachePolicy for NoCache {
+    fn put(&self, _key: &str, _entry: BytesArray) {}
+    fn get(&self, _key: &str) -> Option<BytesArray> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,7 +369,7 @@ mod tests {
 
     macro_rules! new_lru_redis_cache {
         ($dir: expr, $size: expr, $redis_client: ident ) => {
-            LruRedisCache::new($dir, $size, $redis_client, None)
+            LruRedisCache::new($dir, $size, $redis_client)
         };
     }
 

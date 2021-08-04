@@ -1,89 +1,189 @@
+use crate::cache;
+use crate::cache::CachePolicy;
+use crate::cache::NoCache;
 use crate::error::Error::*;
 use crate::error::Result;
-use futures::lock::Mutex;
+use crate::settings::Settings;
+use crate::util;
 use reqwest::ClientBuilder;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-use tokio::sync::watch;
-use tokio::sync::watch::Receiver;
-use warp::hyper::body::Bytes;
 
-type Responder<T> = oneshot::Sender<T>;
-
-#[derive(Debug)]
-pub struct DownloadTask {
-    pub url: String,
-    pub resp: Responder<Result<Bytes>>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Task {
+    PypiIndexTask { pkg_name: String, upstream: String },
+    PypiPackagesTask { pkg_path: String },
+    AnacondaTask { path: String },
+    _Others,
 }
-impl PartialEq for DownloadTask {
-    fn eq(&self, other: &DownloadTask) -> bool {
-        self.url == other.url
+
+impl Task {
+    pub async fn resolve(&self, tm: &TaskManager) -> Result<cache::BytesArray> {
+        // cache
+        let mut cache_result = None;
+        let mut relative_path = String::new();
+        match &self {
+            Task::PypiIndexTask { pkg_name, .. } => {
+                let key = format!("pypi_index_{}", pkg_name);
+                relative_path = key.clone();
+                if let Some(bytes) = tm.get(&self, &key) {
+                    cache_result = Some(bytes)
+                }
+            }
+            Task::PypiPackagesTask { pkg_path, .. } => {
+                relative_path = pkg_path.clone();
+                if let Some(bytes) = tm.get(&self, &pkg_path) {
+                    cache_result = Some(bytes)
+                }
+            }
+            Task::AnacondaTask { path, .. } => {
+                let key = format!("anaconda_index_{}", path);
+                relative_path = path.clone();
+                if let Some(bytes) = tm.get(&self, &key) {
+                    cache_result = Some(bytes)
+                }
+            }
+            _ => (),
+        };
+        if let Some(data) = cache_result {
+            println!("[HIT]");
+            return Ok(data);
+        }
+        // dispatch a cache task
+        println!("add_task");
+        let _f = tm.add_task(self.clone()).await;
+        // cache miss, fetch from upstream
+        let client = ClientBuilder::new().build().unwrap();
+        let resp = client
+            .get(tm.resolve_task_upstream(&self, &relative_path))
+            .send()
+            .await;
+        match resp {
+            Ok(res) => match &self {
+                Task::PypiIndexTask { .. } => {
+                    let text_content = res.text().await.unwrap();
+                    if let Some(url) = tm.config.url.clone() {
+                        Ok(self
+                            .rewrite_upstream(text_content, &url)
+                            .as_bytes()
+                            .to_vec())
+                    } else {
+                        Ok(text_content.as_bytes().to_vec())
+                    }
+                }
+                _ => Ok(res.bytes().await.unwrap().to_vec()),
+            },
+            Err(e) => {
+                eprintln!("failed to fetch upstream: {}", e);
+                Err(RequestError(e))
+            }
+        }
+    }
+
+    pub fn rewrite_upstream(&self, input: String, to: &str) -> String {
+        match &self {
+            Task::PypiIndexTask { .. } => util::pypi_index_rewrite(&input, to),
+            _ => input,
+        }
+    }
+
+    pub fn to_key(&self) -> String {
+        match &self {
+            Task::PypiIndexTask { pkg_name, .. } => format!("pypi_index_{}", pkg_name),
+            _ => "".to_string(),
+        }
+    }
+
+    pub fn relative_path(&self) -> String {
+        match &self {
+            Task::PypiIndexTask { pkg_name, .. } => pkg_name.clone(),
+            Task::PypiPackagesTask { pkg_path } => pkg_path.clone(),
+            Task::AnacondaTask { path } => path.clone(),
+            _ => "".to_string(),
+        }
     }
 }
 
-impl Eq for DownloadTask {}
+pub struct TaskManager {
+    task_list: HashSet<Task>,
+    config: Settings,
+    pub pypi_index_cache: Arc<dyn CachePolicy>,
+    pub pypi_pkg_cache: Arc<dyn CachePolicy>,
+    pub anaconda_cache: Arc<dyn CachePolicy>,
+    _cache_map: HashMap<String, Arc<dyn CachePolicy>>,
+}
 
-pub async fn task_recv(mut rx: mpsc::Receiver<DownloadTask>) {
-    let task_set: HashSet<String> = HashSet::new();
-    let task_rx_map: HashMap<String, Receiver<Option<Bytes>>> = HashMap::new();
-    let task_set_sync = Arc::new(Mutex::new(task_set));
-    let mut task_rx_map_sync = Arc::new(Mutex::new(task_rx_map));
-    while let Some(task) = rx.recv().await {
-        let taskset2 = Arc::clone(&task_set_sync);
-        let task_rx_map_sync_clone = Arc::clone(&mut task_rx_map_sync);
-        tokio::spawn(async move {
-            let url = task.url;
-            let client_clone = ClientBuilder::new().build().unwrap();
-            let mut tx = None;
-            {
-                let mut tasks = taskset2.lock().await;
-                if !tasks.contains(&url) {
-                    tasks.insert(url.clone());
-                    let (chan_tx, rx) = watch::channel(None);
-                    // create channel
-                    tx = Some(chan_tx);
-                    task_rx_map_sync_clone.lock().await.insert(url.clone(), rx);
-                }
-            }
-            // lock released, start downloading the package
-            if !tx.is_none() {
-                // multiple same tasks may be sent concurrently, only one thread whose tx is not None starts the download
-                println!("[Task] downloading {}", &url);
-                match client_clone.get(&url).send().await {
-                    Ok(response) => {
-                        tx.unwrap()
-                            .send(Some(response.bytes().await.unwrap()))
-                            .unwrap();
-                    }
-                    Err(e) => {
-                        eprintln!("[Task] error downloading {}: {}", &url, e);
-                        tx.unwrap().send(None).unwrap();
-                    }
-                }
-                let mut tasks = taskset2.lock().await;
-                tasks.remove(&url);
-                println!("[Task] Finished downloading {}", &url);
-            }
-            {
-                if let Some(rx) = task_rx_map_sync_clone.lock().await.get_mut(&url) {
-                    if rx.changed().await.is_ok() {
-                        if let Some(result) = rx.borrow().clone() {
-                            let _ = task.resp.send(Ok(result));
-                        } else {
-                            let _ = task
-                                .resp
-                                .send(Err(DownloadTaskError(String::from("result is none"))));
+impl TaskManager {
+    pub fn new(config: Settings) -> Self {
+        TaskManager {
+            task_list: HashSet::new(),
+            config,
+            pypi_index_cache: Arc::new(NoCache {}),
+            pypi_pkg_cache: Arc::new(NoCache {}),
+            anaconda_cache: Arc::new(NoCache {}),
+            _cache_map: HashMap::new(),
+        }
+    }
+
+    // add a task into task list
+    async fn add_task(&self, task: Task) {
+        if self.task_list.contains(&task) {
+            println!("ingore task: {:?}", task);
+            return;
+        }
+        println!("added task: {:?}", task);
+        match &task {
+            Task::PypiIndexTask { .. } => {
+                let c = self.pypi_index_cache.clone();
+                let task_clone = task.clone();
+                let to_url = self.config.url.clone();
+                let upstream_url =
+                    self.resolve_task_upstream(&task_clone, &task_clone.relative_path());
+                tokio::spawn(async move {
+                    let client = ClientBuilder::new().build().unwrap();
+                    let resp = client.get(upstream_url).send().await;
+                    match resp {
+                        Ok(res) => {
+                            println!("fetch ok");
+                            let mut content = res.text().await.unwrap();
+                            if let Some(to_url) = to_url {
+                                content = task_clone.rewrite_upstream(content, &to_url);
+                            };
+                            c.put(&task_clone.to_key(), content.as_bytes().to_vec());
                         }
-                    } else {
-                        let _ = task.resp.send(Err(DownloadTaskError(String::from(
-                            "task response receiver error",
-                        ))));
-                    }
-                }
+                        Err(e) => {
+                            eprintln!("failed to fetch upstream: {}", e);
+                        }
+                    };
+                });
             }
-        });
+            _ => {}
+        }
+    }
+
+    pub fn get(&self, task_type: &Task, key: &str) -> Option<cache::BytesArray> {
+        match &task_type {
+            Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key),
+            Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key),
+            Task::AnacondaTask { .. } => self.anaconda_cache.get(key),
+            _ => None,
+        }
+    }
+
+    pub fn resolve_task_upstream(&self, task_type: &Task, link: &str) -> String {
+        match &task_type {
+            Task::PypiIndexTask { pkg_name, .. } => {
+                format!("{}/{}", &self.config.builtin.pypi_index.upstream, pkg_name)
+            }
+            Task::PypiPackagesTask { pkg_path, .. } => format!(
+                "{}/{}",
+                &self.config.builtin.pypi_packages.upstream, pkg_path
+            ),
+            Task::AnacondaTask { path } => {
+                format!("{}/{}", &self.config.builtin.anaconda.upstream, path)
+            }
+            _ => link.to_string(),
+        }
     }
 }
