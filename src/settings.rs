@@ -4,6 +4,7 @@ use config::{Config, Environment, File};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
+    pub port: u16,
     debug: bool,
     redis: Redis,
     pub url: Option<String>,

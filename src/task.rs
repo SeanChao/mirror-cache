@@ -55,10 +55,9 @@ impl Task {
         let _f = tm.add_task(self.clone()).await;
         // cache miss, fetch from upstream
         let client = ClientBuilder::new().build().unwrap();
-        let resp = client
-            .get(tm.resolve_task_upstream(&self, &relative_path))
-            .send()
-            .await;
+        let remote_url = tm.resolve_task_upstream(&self, &relative_path);
+        println!("[Proxy] fetching from: {}", &remote_url);
+        let resp = client.get(remote_url).send().await;
         match resp {
             Ok(res) => match &self {
                 Task::PypiIndexTask { .. } => {
@@ -72,7 +71,10 @@ impl Task {
                         Ok(text_content.as_bytes().to_vec())
                     }
                 }
-                _ => Ok(res.bytes().await.unwrap().to_vec()),
+                _ => {
+                    println!("✔ fetched {:?}", res.content_length());
+                    Ok(res.bytes().await.unwrap().to_vec())
+                }
             },
             Err(e) => {
                 eprintln!("failed to fetch upstream: {}", e);
@@ -91,6 +93,8 @@ impl Task {
     pub fn to_key(&self) -> String {
         match &self {
             Task::PypiIndexTask { pkg_name, .. } => format!("pypi_index_{}", pkg_name),
+            Task::PypiPackagesTask { pkg_path, .. } => String::from(pkg_path),
+            Task::AnacondaTask { path, .. } => format!("anaconda_{}", path),
             _ => "".to_string(),
         }
     }
@@ -133,33 +137,46 @@ impl TaskManager {
             return;
         }
         println!("added task: {:?}", task);
+        let c;
+        let mut rewrite = false;
+        let mut to_url = None;
         match &task {
             Task::PypiIndexTask { .. } => {
-                let c = self.pypi_index_cache.clone();
-                let task_clone = task.clone();
-                let to_url = self.config.url.clone();
-                let upstream_url =
-                    self.resolve_task_upstream(&task_clone, &task_clone.relative_path());
-                tokio::spawn(async move {
-                    let client = ClientBuilder::new().build().unwrap();
-                    let resp = client.get(upstream_url).send().await;
-                    match resp {
-                        Ok(res) => {
-                            println!("fetch ok");
-                            let mut content = res.text().await.unwrap();
-                            if let Some(to_url) = to_url {
-                                content = task_clone.rewrite_upstream(content, &to_url);
-                            };
-                            c.put(&task_clone.to_key(), content.as_bytes().to_vec());
-                        }
-                        Err(e) => {
-                            eprintln!("failed to fetch upstream: {}", e);
-                        }
-                    };
-                });
+                c = self.pypi_index_cache.clone();
+                to_url = self.config.url.clone();
+                rewrite = true;
             }
-            _ => {}
-        }
+            Task::PypiPackagesTask { .. } => {
+                c = self.pypi_pkg_cache.clone();
+            }
+            Task::AnacondaTask { .. } => {
+                c = self.anaconda_cache.clone();
+            }
+            _ => c = Arc::new(NoCache {}),
+        };
+        let task_clone = task.clone();
+        let upstream_url = self.resolve_task_upstream(&task_clone, &task_clone.relative_path());
+        tokio::spawn(async move {
+            let client = ClientBuilder::new().build().unwrap();
+            let resp = client.get(upstream_url).send().await;
+            match resp {
+                Ok(res) => {
+                    if rewrite {
+                        let mut content = res.text().await.unwrap();
+                        if let Some(to_url) = to_url {
+                            content = task_clone.rewrite_upstream(content, &to_url);
+                        };
+                        c.put(&task_clone.to_key(), content.as_bytes().to_vec());
+                    } else {
+                        c.put(&task_clone.to_key(), res.bytes().await.unwrap().to_vec());
+                    }
+                    println!("task completed: {:?}", task);
+                }
+                Err(e) => {
+                    eprintln!("failed to fetch upstream: {}", e);
+                }
+            };
+        });
     }
 
     pub fn get(&self, task_type: &Task, key: &str) -> Option<cache::BytesArray> {

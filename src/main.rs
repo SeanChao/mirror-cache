@@ -16,9 +16,11 @@ extern crate serde_derive;
 #[tokio::main]
 async fn main() {
     let app_settings = settings::Settings::new().unwrap();
-    println!("{:?}", app_settings);
+    let port = app_settings.port;
+
     let api = filters::root(app_settings);
-    warp::serve(api).run(([127, 0, 0, 1], 9000)).await;
+    println!("🎉 Server is running on 127.0.0.1:{}", port);
+    warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
 
 mod filters {
@@ -181,7 +183,7 @@ mod handlers {
         filename: String,
         tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
-        let cache_key = format!("anaconda/{}/{}/{}", channel, arch, filename);
+        let cache_key = format!("{}/{}/{}", channel, arch, filename);
         let t = Task::AnacondaTask { path: cache_key };
         match t.resolve(tm.as_ref()).await {
             Ok(data) => Ok(Response::builder().body(data)),
@@ -196,27 +198,33 @@ mod handlers {
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::fs;
+    use crate::settings::Settings;
     use warp::http::StatusCode;
     use warp::test::request;
     use warp::Filter;
 
-    static TEMP_TTL_DEFAULT: u64 = 5;
-    static TEMP_TTL_CACHE_PATH: &str = "cache/pypi/web/simple";
+    fn get_settings() -> Settings {
+        println!(
+            "{:?}",
+            settings::Settings::new_from("config-test", "app_test").unwrap()
+        );
+        settings::Settings::new_from("config-test", "app_test").unwrap()
+    }
 
     fn get_filter_root() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone
     {
-        let app_settings = settings::Settings::new_from("config-test", "app_test").unwrap();
+        let app_settings = get_settings();
         filters::root(app_settings)
     }
 
     #[tokio::test]
     async fn get_pypi_index() {
+        let app_url = get_settings().url.unwrap();
         let pkg_name = "hello-world";
         let api = get_filter_root();
         let resp = request()
             .method("GET")
-            .path(&format!("/pypi/web/simple/{}", pkg_name))
+            .path(&format!("/pypi/simple/{}", pkg_name))
             .reply(&api)
             .await;
         let resp_bytes = resp.body().to_vec();
@@ -225,63 +233,6 @@ mod test {
         // webpage fetched successfully
         assert!(resp_text.contains(&format!("Links for {}", pkg_name)));
         // target link is replaced successfully
-        assert!(resp_text.contains("http://localhost:9000"));
-    }
-
-    #[tokio::test]
-    async fn get_pypi_index_cached() {
-        let pkg_name = "Luna";
-        let api = get_filter_root();
-        let _resp = request()
-            .method("GET")
-            .path(&format!("/pypi/web/simple/{}", pkg_name))
-            .reply(&api)
-            .await;
-        // hack local cache
-        let data = "My mum always said things we lose have a way of coming back to us in the end. If not always in the way we expect.";
-        fs::write(
-            cache::TtlRedisCache::to_fs_path(TEMP_TTL_CACHE_PATH, pkg_name),
-            data,
-        )
-        .unwrap();
-        let resp = request()
-            .method("GET")
-            .path(&format!("/pypi/web/simple/{}", pkg_name))
-            .reply(&api)
-            .await;
-        let resp_bytes = resp.body().to_vec();
-        let resp_text = std::str::from_utf8(&resp_bytes).unwrap();
-        assert_eq!(resp_text, data);
-    }
-
-    #[tokio::test]
-    async fn get_pypi_index_cache_expired() {
-        let pkg_name = "moon";
-        let api = get_filter_root();
-        let _resp = request()
-            .method("GET")
-            .path(&format!("/pypi/web/simple/{}", pkg_name))
-            .reply(&api)
-            .await;
-        // wait for cache expiration
-        std::thread::sleep(std::time::Duration::from_millis(
-            TEMP_TTL_DEFAULT * 1000 + 1000,
-        ));
-        let fs_path = cache::TtlRedisCache::to_fs_path(TEMP_TTL_CACHE_PATH, pkg_name);
-        assert!(!std::path::Path::new(&fs_path).exists()); // cache file should be removed
-                                                           // hack local cache
-        let data = "月がきれい";
-        let (parents, _file) = util::split_dirs(&fs_path);
-        fs::create_dir_all(parents).unwrap();
-        fs::write(&fs_path, data).unwrap();
-        let resp = request()
-            .method("GET")
-            .path(&format!("/pypi/web/simple/{}", pkg_name))
-            .reply(&api)
-            .await;
-        let resp_bytes = resp.body().to_vec();
-        let resp_text = std::str::from_utf8(&resp_bytes).unwrap();
-        assert!(resp_text.contains("Links for"));
-        assert_ne!(resp_text, data);
+        assert!(resp_text.contains(&app_url));
     }
 }

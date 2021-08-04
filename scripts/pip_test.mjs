@@ -5,7 +5,7 @@ import { pip_install, clean } from './lib.mjs'
 
 const config = {
 	'exec': 'cargo run',
-	'mirror': 'http://localhost:9000/pypi/web/simple',
+	'mirror': 'http://localhost:9000/pypi/simple',
 	...argv
 }
 

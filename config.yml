@@ -1,38 +1,32 @@
 port: 9000
 debug: true
-url: https://localhost:9000/ # url of deployed app
+url: http://localhost:9000 # url of deployed app
 
 redis:
   url: redis://localhost
 
 builtin:
   pypi_index:
-    # policy: "policy_ttl_60"
-    policy: "policy_lru_1k"
+    policy: "policy_ttl_60"
     upstream: "https://pypi.org/simple"
   pypi_packages:
-    policy: "policy_lru_1k"
-    upstream: "https://files.pythonhosted.org"
+    policy: "policy_lru_16M"
+    upstream: "https://files.pythonhosted.org/packages"
   anaconda:
     policy: "policy_ttl_60"
     upstream: "https://conda-static.anaconda.org"
 
 rules:
-  - path: "/pypi/simple/*"
-    target: "pypi_index"
+  - path: "unimplemented_example"
     policy: "policy_ttl_60"
-    upstream: "https://pypi.org/simple/"
-  - path: "/pypi-packages/*"
-    target: "pypi-packages"
-    policy: "policy_lru_1k"
-    upstream: "https://pypi.org/simple"
+    upstream: "https://upstream.org/simple/"
 
 policies:
   - name: policy_ttl_60
     type: TTL
-    path: "cache/ttl/"
+    path: "cache/ttl"
     timeout: 60
-  - name: policy_lru_1k
+  - name: policy_lru_16M
     type: LRU
-    size: 1024
-    path: "cache/lru/"
+    size: 16777216
+    path: "cache/lru"

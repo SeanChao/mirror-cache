@@ -8,7 +8,7 @@ docker \
 	python \
 	python -m \
 	pip install \
-	-i http://localhost:9000/pypi/web/simple \
+	-i ${MIRROR} \
 	--disable-pip-version-check \
 	--retries 0 \
 	--no-cache-dir \

@@ -33,6 +33,10 @@ impl LruRedisCache {
             redis_client,
         }
     }
+
+    pub fn to_fs_path(&self, cache_key: &str) -> String {
+        format!("{}/{}", self.root_dir, cache_key)
+    }
 }
 
 impl CachePolicy for LruRedisCache {
@@ -48,10 +52,7 @@ impl CachePolicy for LruRedisCache {
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
 
         if file_size > self.size_limit {
-            println!(
-                "skip cache for {:?}, because its size exceeds the limit",
-                entry
-            );
+            println!("skip cache for {}, because its size exceeds the limit", key);
         }
         // evict cache entry if necessary
         let _tx_result = redis::transaction(
@@ -83,7 +84,7 @@ impl CachePolicy for LruRedisCache {
                     }
                     // remove from local fs and metadata in redis
                     for (f, _) in pkg_to_remove {
-                        let path = format!("cache/{}", f);
+                        let path = self.to_fs_path(&f);
                         println!("remove: {}", path);
                         match fs::remove_file(path) {
                             Ok(_) => {}
@@ -104,9 +105,10 @@ impl CachePolicy for LruRedisCache {
         );
         // cache to local filesystem
         let data_to_write = entry;
-        let (parent_dirs, _cache_file_name) = util::split_dirs(key);
-        fs::create_dir_all(format!("cache/{}", parent_dirs)).unwrap();
-        let mut f = fs::File::create(format!("cache/{}", key)).unwrap();
+        let fs_path = self.to_fs_path(key);
+        let (parent_dirs, _cache_file_name) = util::split_dirs(&fs_path);
+        fs::create_dir_all(parent_dirs).unwrap();
+        let mut f = fs::File::create(fs_path).unwrap();
         f.write_all(&data_to_write).unwrap();
         let entry = &CacheEntry::new(&key, data_to_write.len() as u64);
         let _redis_resp_str = models::set_cache_entry(&mut sync_con, &key, entry);
@@ -127,7 +129,7 @@ impl CachePolicy for LruRedisCache {
                     println!("Failed to update cache entry atime: {}", e);
                 }
             }
-            let cached_file_path = format!("cache/{}", key);
+            let cached_file_path = self.to_fs_path(key);
             let file_content = match fs::read(cached_file_path) {
                 Ok(data) => data,
                 Err(_) => vec![],
