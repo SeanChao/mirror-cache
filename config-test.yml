@@ -1,9 +1,9 @@
 port: 9001
 debug: true
-url: https://localhost:9000/ # url of deployed app
+url: https://localhost:9001 # url of deployed app
 
 redis:
-  url: redis://localhost
+  url: redis://localhost:3001
 
 builtin:
   pypi_index:
