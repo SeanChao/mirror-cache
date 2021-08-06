@@ -96,10 +96,15 @@ mod filters {
         tm.pypi_pkg_cache = pypi_pkg_cache;
         tm.anaconda_cache = anaconda_cache;
 
-        let arc_tm = Arc::new(tm);
-        pypi_index(arc_tm.clone())
-            .or(pypi_packages(arc_tm.clone()))
-            .or(anaconda_all(arc_tm.clone()))
+        let shared_tm = Arc::new(tm);
+        let log = warp::log::custom(|info| {
+            println!("🌐 {} {} {}", info.method(), info.path(), info.status(),);
+        });
+
+        pypi_index(shared_tm.clone())
+            .or(pypi_packages(shared_tm.clone()))
+            .or(anaconda_all(shared_tm.clone()))
+            .with(log)
     }
 
     fn with_tm(
@@ -150,8 +155,7 @@ mod handlers {
             pkg_name: path,
             upstream: "https://pypi.org/simple".to_string(),
         };
-        let rtm = tm.as_ref();
-        match tw.resolve(rtm).await {
+        match tw.resolve(tm).await {
             Ok(data) => Ok(Response::builder()
                 .header("content-type", "text/html")
                 .body(data)),
@@ -168,7 +172,7 @@ mod handlers {
     ) -> Result<impl warp::Reply, Rejection> {
         let fullpath = format!("{}/{}/{}/{}", seg0, seg1, seg2, seg3);
         let t = Task::PypiPackagesTask { pkg_path: fullpath };
-        match t.resolve(tm.as_ref()).await {
+        match t.resolve(tm).await {
             Ok(data) => Ok(Response::builder().body(data)),
             Err(e) => {
                 eprintln!("{}", e);
@@ -185,7 +189,7 @@ mod handlers {
     ) -> Result<impl warp::Reply, Rejection> {
         let cache_key = format!("{}/{}/{}", channel, arch, filename);
         let t = Task::AnacondaTask { path: cache_key };
-        match t.resolve(tm.as_ref()).await {
+        match t.resolve(tm).await {
             Ok(data) => Ok(Response::builder().body(data)),
             Err(e) => {
                 eprintln!("{}", e);

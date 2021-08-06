@@ -1,6 +1,6 @@
 port: 9000
 debug: true
-url: http://localhost:9000 # url of deployed app
+url: http://localhost:9000 # url of this app
 
 redis:
   url: redis://localhost
@@ -10,7 +10,7 @@ builtin:
     policy: "policy_ttl_60"
     upstream: "https://pypi.org/simple"
   pypi_packages:
-    policy: "policy_lru_16M"
+    policy: "policy_lru_8G"
     upstream: "https://files.pythonhosted.org/packages"
   anaconda:
     policy: "policy_ttl_60"
@@ -29,4 +29,8 @@ policies:
   - name: policy_lru_16M
     type: LRU
     size: 16777216
+    path: "cache/lru"
+  - name: policy_lru_8G
+    type: LRU
+    size: 8589934592
     path: "cache/lru"

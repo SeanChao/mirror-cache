@@ -9,6 +9,7 @@ use reqwest::ClientBuilder;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Task {
@@ -19,8 +20,8 @@ pub enum Task {
 }
 
 impl Task {
-    pub async fn resolve(&self, tm: &TaskManager) -> Result<cache::BytesArray> {
-        // cache
+    pub async fn resolve(&self, tm: Arc<TaskManager>) -> Result<cache::BytesArray> {
+        // try get from cache
         let mut cache_result = None;
         let mut relative_path = String::new();
         match &self {
@@ -47,16 +48,15 @@ impl Task {
             _ => (),
         };
         if let Some(data) = cache_result {
-            println!("[HIT]");
+            println!("[Request] {:?} [HIT]", &self);
             return Ok(data);
         }
-        // dispatch a cache task
-        println!("add_task");
-        let _f = tm.add_task(self.clone()).await;
-        // cache miss, fetch from upstream
+        // cache miss, dispatch async cache task
+        let _ = tm.add_task(self.clone()).await;
+        // fetch from upstream
         let client = ClientBuilder::new().build().unwrap();
         let remote_url = tm.resolve_task_upstream(&self, &relative_path);
-        println!("[Proxy] fetching from: {}", &remote_url);
+        println!("[Request] {:?} fetching from: {}", &self, &remote_url);
         let resp = client.get(remote_url).send().await;
         match resp {
             Ok(res) => match &self {
@@ -72,12 +72,12 @@ impl Task {
                     }
                 }
                 _ => {
-                    println!("✔ fetched {:?}", res.content_length());
+                    println!("[Request] {:?} ✔ fetched {:?}", &self, res.content_length());
                     Ok(res.bytes().await.unwrap().to_vec())
                 }
             },
             Err(e) => {
-                eprintln!("failed to fetch upstream: {}", e);
+                eprintln!("[Request] {:?} failed to fetch upstream: {}", &self, e);
                 Err(RequestError(e))
             }
         }
@@ -110,33 +110,38 @@ impl Task {
 }
 
 pub struct TaskManager {
-    task_list: HashSet<Task>,
     config: Settings,
     pub pypi_index_cache: Arc<dyn CachePolicy>,
     pub pypi_pkg_cache: Arc<dyn CachePolicy>,
     pub anaconda_cache: Arc<dyn CachePolicy>,
     _cache_map: HashMap<String, Arc<dyn CachePolicy>>,
+    task_set: Arc<RwLock<HashSet<Task>>>,
 }
 
 impl TaskManager {
     pub fn new(config: Settings) -> Self {
         TaskManager {
-            task_list: HashSet::new(),
             config,
             pypi_index_cache: Arc::new(NoCache {}),
             pypi_pkg_cache: Arc::new(NoCache {}),
             anaconda_cache: Arc::new(NoCache {}),
             _cache_map: HashMap::new(),
+            task_set: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
     // add a task into task list
     async fn add_task(&self, task: Task) {
-        if self.task_list.contains(&task) {
-            println!("ingore task: {:?}", task);
+        if self.task_set.read().await.contains(&task) {
+            println!("[TASK] ignored existing task: {:?}", task);
             return;
         }
-        println!("added task: {:?}", task);
+        self.task_set.write().await.insert(task.clone());
+        println!(
+            "[TASK] [len={}] + {:?}",
+            self.task_set.read().await.len(),
+            task
+        );
         let c;
         let mut rewrite = false;
         let mut to_url = None;
@@ -156,6 +161,8 @@ impl TaskManager {
         };
         let task_clone = task.clone();
         let upstream_url = self.resolve_task_upstream(&task_clone, &task_clone.relative_path());
+        // let tm = self.clone();
+        let task_list_ptr = self.task_set.clone();
         tokio::spawn(async move {
             let client = ClientBuilder::new().build().unwrap();
             let resp = client.get(upstream_url).send().await;
@@ -170,12 +177,13 @@ impl TaskManager {
                     } else {
                         c.put(&task_clone.to_key(), res.bytes().await.unwrap().to_vec());
                     }
-                    println!("task completed: {:?}", task);
+                    println!("[TASK] ✔ {:?}", task_clone);
                 }
                 Err(e) => {
-                    eprintln!("failed to fetch upstream: {}", e);
+                    eprintln!("[TASK] ❌ failed to fetch upstream: {}", e);
                 }
             };
+            task_list_ptr.write().await.remove(&task_clone);
         });
     }
 
