@@ -1,15 +1,33 @@
 # Documentation
 
+## Configurations
+
+An [example](../config.yml)
+
+### Common Options
+
+### Rules
+
+Rules are an array of customized proxy rules.
+
+- path: the path to match, supports regular expression
+- policy: the name of policy to use, defined in `policies`
+- upstream: the upstream of the path, the reverse proxy will try to fetch targets from the upstream
+
 ## Cache Policies
 
-## `LruRedisCache`
+## Lru Redis Cache
+
+Config key: `LRU`
 
 `LruRedisCache` is a cache policy that limits the total **disk space usage**. All files are cached to the local filesystem.
 
 If the size of all cached files exceeds specied limit, the program will evict a cache entry base on **least recent used (LRU)** policy.
 Every time a file is accessed, its access time is updated to a newer one. Those cache entries with lease recent access time are evicted until we have enough space for the new cache entry.
 
-## `TtlRedisCache`
+## TTL Redis Cache
+
+Config key: `TTL`
 
 > Note: To use this cache policy, please enable redis keyspace events notification, see [redis.conf](../redis.conf) for reference.
 

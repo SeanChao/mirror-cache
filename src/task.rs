@@ -11,41 +11,42 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub type SharedTaskManager = Arc<TaskManager>;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Task {
-    PypiIndexTask { pkg_name: String, upstream: String },
+    PypiIndexTask { pkg_name: String },
     PypiPackagesTask { pkg_path: String },
     AnacondaTask { path: String },
-    _Others,
+    Others { rule_id: RuleId, url: String },
 }
 
 impl Task {
     pub async fn resolve(&self, tm: Arc<TaskManager>) -> Result<cache::BytesArray> {
         // try get from cache
         let mut cache_result = None;
-        let mut relative_path = String::new();
+        let key = self.to_key();
         match &self {
-            Task::PypiIndexTask { pkg_name, .. } => {
-                let key = format!("pypi_index_{}", pkg_name);
-                relative_path = key.clone();
+            Task::PypiIndexTask { .. } => {
                 if let Some(bytes) = tm.get(&self, &key) {
                     cache_result = Some(bytes)
                 }
             }
-            Task::PypiPackagesTask { pkg_path, .. } => {
-                relative_path = pkg_path.clone();
-                if let Some(bytes) = tm.get(&self, &pkg_path) {
-                    cache_result = Some(bytes)
-                }
-            }
-            Task::AnacondaTask { path, .. } => {
-                let key = format!("anaconda_index_{}", path);
-                relative_path = path.clone();
+            Task::PypiPackagesTask { .. } => {
                 if let Some(bytes) = tm.get(&self, &key) {
                     cache_result = Some(bytes)
                 }
             }
-            _ => (),
+            Task::AnacondaTask { .. } => {
+                if let Some(bytes) = tm.get(&self, &key) {
+                    cache_result = Some(bytes)
+                }
+            }
+            Task::Others { .. } => {
+                if let Some(bytes) = tm.get(&self, &key) {
+                    cache_result = Some(bytes);
+                }
+            }
         };
         if let Some(data) = cache_result {
             println!("[Request] {:?} [HIT]", &self);
@@ -55,7 +56,7 @@ impl Task {
         let _ = tm.add_task(self.clone()).await;
         // fetch from upstream
         let client = ClientBuilder::new().build().unwrap();
-        let remote_url = tm.resolve_task_upstream(&self, &relative_path);
+        let remote_url = tm.resolve_task_upstream(&self);
         println!("[Request] {:?} fetching from: {}", &self, &remote_url);
         let resp = client.get(remote_url).send().await;
         match resp {
@@ -95,26 +96,21 @@ impl Task {
             Task::PypiIndexTask { pkg_name, .. } => format!("pypi_index_{}", pkg_name),
             Task::PypiPackagesTask { pkg_path, .. } => String::from(pkg_path),
             Task::AnacondaTask { path, .. } => format!("anaconda_{}", path),
-            _ => "".to_string(),
-        }
-    }
-
-    pub fn relative_path(&self) -> String {
-        match &self {
-            Task::PypiIndexTask { pkg_name, .. } => pkg_name.clone(),
-            Task::PypiPackagesTask { pkg_path } => pkg_path.clone(),
-            Task::AnacondaTask { path } => path.clone(),
-            _ => "".to_string(),
+            Task::Others { url, .. } => url
+                .replace("http://", "http/")
+                .replace("https://", "https/"),
         }
     }
 }
 
+pub type RuleId = usize;
+
 pub struct TaskManager {
-    config: Settings,
+    pub config: Settings,
     pub pypi_index_cache: Arc<dyn CachePolicy>,
     pub pypi_pkg_cache: Arc<dyn CachePolicy>,
     pub anaconda_cache: Arc<dyn CachePolicy>,
-    _cache_map: HashMap<String, Arc<dyn CachePolicy>>,
+    pub cache_map: HashMap<RuleId, Arc<dyn CachePolicy>>,
     task_set: Arc<RwLock<HashSet<Task>>>,
 }
 
@@ -125,7 +121,7 @@ impl TaskManager {
             pypi_index_cache: Arc::new(NoCache {}),
             pypi_pkg_cache: Arc::new(NoCache {}),
             anaconda_cache: Arc::new(NoCache {}),
-            _cache_map: HashMap::new(),
+            cache_map: HashMap::new(),
             task_set: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -157,11 +153,12 @@ impl TaskManager {
             Task::AnacondaTask { .. } => {
                 c = self.anaconda_cache.clone();
             }
-            _ => c = Arc::new(NoCache {}),
+            Task::Others { rule_id, .. } => {
+                c = self.get_cache_for_cache_rule(*rule_id).unwrap();
+            }
         };
         let task_clone = task.clone();
-        let upstream_url = self.resolve_task_upstream(&task_clone, &task_clone.relative_path());
-        // let tm = self.clone();
+        let upstream_url = self.resolve_task_upstream(&task_clone);
         let task_list_ptr = self.task_set.clone();
         tokio::spawn(async move {
             let client = ClientBuilder::new().build().unwrap();
@@ -192,11 +189,17 @@ impl TaskManager {
             Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key),
             Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key),
             Task::AnacondaTask { .. } => self.anaconda_cache.get(key),
-            _ => None,
+            Task::Others { rule_id, .. } => match self.get_cache_for_cache_rule(*rule_id) {
+                Some(cache) => cache.get(key),
+                None => {
+                    eprintln!("Failed to get cache for rule #{} from cache map", rule_id);
+                    None
+                }
+            },
         }
     }
 
-    pub fn resolve_task_upstream(&self, task_type: &Task, link: &str) -> String {
+    pub fn resolve_task_upstream(&self, task_type: &Task) -> String {
         match &task_type {
             Task::PypiIndexTask { pkg_name, .. } => {
                 format!("{}/{}", &self.config.builtin.pypi_index.upstream, pkg_name)
@@ -208,7 +211,19 @@ impl TaskManager {
             Task::AnacondaTask { path } => {
                 format!("{}/{}", &self.config.builtin.anaconda.upstream, path)
             }
-            _ => link.to_string(),
+            Task::Others { url, .. } => url.clone(),
+        }
+    }
+
+    pub fn add_cache(&mut self, rule_id: RuleId, cache: Arc<dyn CachePolicy>) {
+        // insert cache into cache map
+        self.cache_map.insert(rule_id, cache);
+    }
+
+    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn CachePolicy>> {
+        match self.cache_map.get(&rule_id) {
+            Some(cache) => Some(cache.clone()),
+            None => None,
         }
     }
 }

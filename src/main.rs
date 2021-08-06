@@ -5,10 +5,16 @@ mod settings;
 mod task;
 mod util;
 
+use crate::cache::CachePolicy;
+use crate::error::Error;
+use crate::error::Result;
+use crate::settings::Policy;
+use crate::settings::PolicyType;
+use crate::settings::Rule;
+use crate::task::SharedTaskManager;
 use crate::task::TaskManager;
+use regex::Regex;
 use std::sync::Arc;
-
-type SharedTaskManager = Arc<TaskManager>;
 
 #[macro_use]
 extern crate serde_derive;
@@ -18,85 +24,80 @@ async fn main() {
     let app_settings = settings::Settings::new().unwrap();
     let port = app_settings.port;
 
-    let api = filters::root(app_settings);
+    let redis_url = app_settings.get_redis_url();
+    let policies = app_settings.policies.clone();
+    let pypi_index_rule = app_settings.builtin.clone().pypi_index;
+    let pypi_pkg_rule = app_settings.builtin.clone().pypi_packages;
+    let anaconda_rule = app_settings.builtin.clone().anaconda;
+
+    let mut tm = TaskManager::new(app_settings.clone());
+
+    let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
+    let pypi_index_cache =
+        create_cache_from_rule(&pypi_index_rule, &policies, Some(redis_client.clone())).unwrap();
+    let pypi_pkg_cache =
+        create_cache_from_rule(&pypi_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
+    let anaconda_cache =
+        create_cache_from_rule(&anaconda_rule, &policies, Some(redis_client.clone())).unwrap();
+
+    tm.pypi_index_cache = pypi_index_cache;
+    tm.pypi_pkg_cache = pypi_pkg_cache;
+    tm.anaconda_cache = anaconda_cache;
+
+    for (idx, rule) in app_settings.rules.iter().enumerate() {
+        println!("creating rule #{}: {:?}", idx, rule);
+        let cache = create_cache_from_rule(rule, &policies, Some(redis_client.clone())).unwrap();
+        tm.add_cache(idx, cache);
+    }
+
+    let shared_tm = Arc::new(tm);
+    let api = filters::root(shared_tm);
     println!("🎉 Server is running on 127.0.0.1:{}", port);
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
+}
+
+fn create_cache_from_rule(
+    rule: &Rule,
+    policies: &Vec<Policy>,
+    redis_client: Option<redis::Client>,
+) -> Result<Arc<dyn CachePolicy>> {
+    let policy_ident = rule.policy.clone();
+    for p in policies {
+        if p.name == policy_ident {
+            let policy_type = p.typ;
+            match policy_type {
+                PolicyType::Lru => {
+                    return Ok(Arc::new(cache::LruRedisCache::new(
+                        p.path.as_ref().unwrap(),
+                        p.size.unwrap_or(0),
+                        redis_client.unwrap(),
+                    )));
+                }
+                PolicyType::Ttl => {
+                    return Ok(Arc::new(cache::TtlRedisCache::new(
+                        p.path.as_ref().unwrap(),
+                        p.timeout.unwrap_or(0),
+                        redis_client.unwrap(),
+                    )));
+                }
+            };
+        }
+    }
+    Err(Error::ConfigInvalid(format!(
+        "failed to find a matched policy for rule {:?}",
+        rule
+    )))
 }
 
 mod filters {
     use super::handlers;
     use super::*;
-    use crate::cache;
-    use crate::cache::CachePolicy;
-    use crate::error::Error;
-    use crate::error::Result;
-    use crate::settings::Policy;
-    use crate::settings::PolicyType;
-    use crate::settings::Rule;
-    use crate::settings::Settings;
-    use crate::task::TaskManager;
     use std::convert::Infallible;
-    use std::sync::Arc;
     use warp::Filter;
 
-    fn create_cache_from_rule(
-        rule: &Rule,
-        policies: &Vec<Policy>,
-        redis_client: Option<redis::Client>,
-    ) -> Result<Arc<dyn CachePolicy>> {
-        let policy_ident = rule.policy.clone();
-        for p in policies {
-            if p.name == policy_ident {
-                let policy_type = p.typ;
-                match policy_type {
-                    PolicyType::Lru => {
-                        return Ok(Arc::new(cache::LruRedisCache::new(
-                            p.path.as_ref().unwrap(),
-                            p.size.unwrap_or(0),
-                            redis_client.unwrap(),
-                        )));
-                    }
-                    PolicyType::Ttl => {
-                        return Ok(Arc::new(cache::TtlRedisCache::new(
-                            p.path.as_ref().unwrap(),
-                            p.timeout.unwrap_or(0),
-                            redis_client.unwrap(),
-                        )));
-                    }
-                };
-            }
-        }
-        Err(Error::ConfigInvalid(format!(
-            "failed to find a matched policy for rule {:?}",
-            rule
-        )))
-    }
-
     pub fn root(
-        settings: Settings,
+        shared_tm: SharedTaskManager,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        let redis_url = settings.get_redis_url();
-        let policies = settings.policies.clone();
-        let pypi_index_rule = settings.builtin.clone().pypi_index;
-        let pypi_pkg_rule = settings.builtin.clone().pypi_packages;
-        let anaconda_rule = settings.builtin.clone().anaconda;
-
-        let mut tm = TaskManager::new(settings.clone());
-
-        let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
-        let pypi_index_cache =
-            create_cache_from_rule(&pypi_index_rule, &policies, Some(redis_client.clone()))
-                .unwrap();
-        let pypi_pkg_cache =
-            create_cache_from_rule(&pypi_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
-        let anaconda_cache =
-            create_cache_from_rule(&anaconda_rule, &policies, Some(redis_client.clone())).unwrap();
-
-        tm.pypi_index_cache = pypi_index_cache;
-        tm.pypi_pkg_cache = pypi_pkg_cache;
-        tm.anaconda_cache = anaconda_cache;
-
-        let shared_tm = Arc::new(tm);
         let log = warp::log::custom(|info| {
             println!("🌐 {} {} {}", info.method(), info.path(), info.status(),);
         });
@@ -104,6 +105,7 @@ mod filters {
         pypi_index(shared_tm.clone())
             .or(pypi_packages(shared_tm.clone()))
             .or(anaconda_all(shared_tm.clone()))
+            .or(fallback(shared_tm.clone()))
             .with(log)
     }
 
@@ -139,11 +141,21 @@ mod filters {
             .and(with_tm(tm))
             .and_then(handlers::get_anaconda)
     }
+
+    fn fallback(
+        tm: SharedTaskManager,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path::tail()
+            .map(|tail: warp::filters::path::Tail| tail.as_str().to_string())
+            .and(with_tm(tm))
+            .and_then(handlers::fallback_handler)
+    }
 }
 
 mod handlers {
     use super::*;
     use crate::task::Task;
+    use std::result::Result;
 
     use warp::{http::Response, Rejection};
 
@@ -151,10 +163,7 @@ mod handlers {
         path: String,
         tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
-        let tw = Task::PypiIndexTask {
-            pkg_name: path,
-            upstream: "https://pypi.org/simple".to_string(),
-        };
+        let tw = Task::PypiIndexTask { pkg_name: path };
         match tw.resolve(tm).await {
             Ok(data) => Ok(Response::builder()
                 .header("content-type", "text/html")
@@ -197,6 +206,33 @@ mod handlers {
             }
         }
     }
+
+    pub async fn fallback_handler(
+        path: String,
+        tm: SharedTaskManager,
+    ) -> Result<impl warp::Reply, Rejection> {
+        // Dynamically dispatch tasks defined in config file
+        println!("matched fallback path: {}", path);
+        let config = &tm.config;
+        for (idx, rule) in config.rules.iter().enumerate() {
+            let upstream = rule.upstream.clone();
+            if let Some(rule_regex) = &rule.path {
+                let re = Regex::new(rule_regex).unwrap();
+                if re.is_match(&path) {
+                    println!("captured by rule #{}: {}", idx, rule_regex);
+                    let replaced = re.replace_all(&path, &upstream);
+                    let t = Task::Others {
+                        rule_id: idx,
+                        url: String::from(replaced),
+                    };
+                    if let Ok(data) = t.resolve(tm.clone()).await {
+                        return Ok(Response::builder().body(data));
+                    }
+                }
+            }
+        }
+        Err(warp::reject())
+    }
 }
 
 #[cfg(test)]
@@ -218,7 +254,8 @@ mod test {
     fn get_filter_root() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone
     {
         let app_settings = get_settings();
-        filters::root(app_settings)
+        let tm = TaskManager::new(app_settings.clone());
+        filters::root(Arc::new(tm))
     }
 
     #[tokio::test]

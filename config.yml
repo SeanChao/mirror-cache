@@ -17,20 +17,21 @@ builtin:
     upstream: "https://conda-static.anaconda.org"
 
 rules:
-  - path: "unimplemented_example"
-    policy: "policy_ttl_60"
-    upstream: "https://upstream.org/simple/"
+  - path: 'ubuntu/dists/(.*)/(.*)'
+    policy: "policy_ubuntu"
+    upstream: "http://archive.ubuntu.com/ubuntu/dists/$1/$2"
+    id: "ubuntu"
 
 policies:
   - name: policy_ttl_60
     type: TTL
     path: "cache/ttl"
     timeout: 60
-  - name: policy_lru_16M
-    type: LRU
-    size: 16777216
-    path: "cache/lru"
   - name: policy_lru_8G
     type: LRU
     size: 8589934592
     path: "cache/lru"
+  - name: policy_ubuntu
+    type: LRU
+    size: 0x2000000 # 32M
+    path: cache/ubuntu
