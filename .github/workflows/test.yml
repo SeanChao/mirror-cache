@@ -32,6 +32,6 @@ jobs:
           npm install -g zx
           make redis
           cargo run &
-          make pip_test
+          make scenario_test
           kill %1
           make redis_stop

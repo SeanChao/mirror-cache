@@ -19,7 +19,7 @@ pub fn get_sync_con(client: &redis::Client) -> Result<SyncConnection> {
         .map_err(|e| RedisClientError(e).into())
 }
 
-// get cache entry
+/// get cache entry
 pub fn get_cache_entry(
     con: &mut SyncConnection,
     key: &str,
@@ -45,29 +45,45 @@ pub fn get_cache_entry(
     Ok(Some(cache_entry))
 }
 
-// FIXME: do not update size when key exists
-pub fn set_cache_entry(
+/// set an lru cache entry
+pub fn set_lru_cache_entry(
     con: &mut SyncConnection,
     key: &str,
     entry: &CacheEntry<LruCacheMetadata, String, ()>,
+    total_size_key: &str,
+    zlist_key: &str,
 ) -> Result<()> {
     let kv_array = entry.to_redis_multiple_fields();
-    let tx_result = redis::transaction(con, &[key, "total_size", "cache_keys"], |con, pipe| {
-        pipe.incr("total_size", entry.metadata.size)
-            .hset_multiple::<&str, &str, String>(key, &kv_array)
-            .ignore()
-            .zadd("cache_keys", key, entry.metadata.atime)
-            .query(con)?;
+    let tx_result = redis::transaction(con, &[key, total_size_key, zlist_key], |con, pipe| {
+        let pkg_size: Option<u64> = con.hget(&key, "size").unwrap();
+        pipe.decr(
+            total_size_key,
+            if let Some(old_size) = pkg_size {
+                old_size
+            } else {
+                0
+            },
+        )
+        .incr(total_size_key, entry.metadata.size)
+        .hset_multiple::<&str, &str, String>(key, &kv_array)
+        .ignore()
+        .zadd(zlist_key, key, entry.metadata.atime)
+        .query(con)?;
         Ok(Some(()))
     });
     tx_result.map_err(|e| RedisCMDError(e))
 }
 
-pub fn update_cache_entry_atime(con: &mut SyncConnection, key: &str, atime: i64) -> Result<i64> {
+pub fn update_cache_entry_atime(
+    con: &mut SyncConnection,
+    key: &str,
+    atime: i64,
+    zlist_key: &str,
+) -> Result<i64> {
     match redis::pipe()
         .atomic()
         .hset(key, "atime", atime)
-        .zadd("cache_keys", key, atime)
+        .zadd(zlist_key, key, atime)
         .query::<(i64, i64)>(con)
     {
         Ok(_) => Ok(atime),
