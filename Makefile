@@ -7,6 +7,7 @@ run:
 	cargo run
 
 test:
+	docker stop redis_test || return 0
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
 	cargo test
 	docker stop redis_test
@@ -55,7 +56,7 @@ clean:
 	docker stop redis_dev || return 0
 	docker stop redis_test || return 0
 
-pip_test:
+scenario_test:
 	zx ./scripts/pip_test.mjs
 	zx ./scripts/conda_test.mjs
 	zx ./scripts/concurrent.mjs

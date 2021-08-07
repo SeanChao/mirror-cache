@@ -62,7 +62,7 @@ fn create_cache_from_rule(
     redis_client: Option<redis::Client>,
 ) -> Result<Arc<dyn CachePolicy>> {
     let policy_ident = rule.policy.clone();
-    for p in policies {
+    for (idx, p) in policies.iter().enumerate() {
         if p.name == policy_ident {
             let policy_type = p.typ;
             match policy_type {
@@ -71,6 +71,7 @@ fn create_cache_from_rule(
                         p.path.as_ref().unwrap(),
                         p.size.unwrap_or(0),
                         redis_client.unwrap(),
+                        &format!("lru_rule{}", idx),
                     )));
                 }
                 PolicyType::Ttl => {
