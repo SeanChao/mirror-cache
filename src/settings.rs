@@ -8,6 +8,7 @@ pub struct Settings {
     debug: bool,
     redis: Redis,
     pub url: Option<String>,
+    pub log_level: String,
     pub rules: Vec<Rule>,
     pub policies: Vec<Policy>,
     pub builtin: BuiltinRules,
@@ -80,5 +81,18 @@ impl Settings {
 
     pub fn get_redis_url(&self) -> String {
         self.redis.url.clone()
+    }
+
+    /// parse log level string to log::LevelFilter enum.
+    /// The default log level is `info`.
+    pub fn get_log_level(&self) -> log::LevelFilter {
+        match self.log_level.to_lowercase().as_str() {
+            "error" => log::LevelFilter::Error,
+            "warn" => log::LevelFilter::Warn,
+            "info" => log::LevelFilter::Info,
+            "debug" => log::LevelFilter::Debug,
+            "trace" => log::LevelFilter::Trace,
+            _ => log::LevelFilter::Info,
+        }
     }
 }

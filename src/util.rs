@@ -1,3 +1,7 @@
+use crate::error::Error;
+use crate::error::Result;
+use reqwest::ClientBuilder;
+
 pub fn now() -> i64 {
     chrono::offset::Local::now().timestamp()
 }
@@ -22,6 +26,18 @@ pub fn pypi_index_rewrite(input: &str, base_url: &str) -> String {
         "https://files.pythonhosted.org/",
         &format!("{}/{}", base_url, "pypi/"),
     )
+}
+
+pub async fn make_request(url: &str) -> Result<reqwest::Response> {
+    let client = ClientBuilder::new().build().unwrap();
+    let resp = client.get(url).send().await;
+    match resp {
+        Ok(res) => {
+            debug!("outbound request: {:?} {:?}", res.status(), res.headers());
+            Ok(res)
+        }
+        Err(e) => Err(Error::RequestError(e)),
+    }
 }
 
 #[cfg(test)]

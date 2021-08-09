@@ -19,9 +19,20 @@ use std::sync::Arc;
 #[macro_use]
 extern crate serde_derive;
 
+extern crate pretty_env_logger;
+#[macro_use]
+extern crate log;
+
 #[tokio::main]
 async fn main() {
     let app_settings = settings::Settings::new().unwrap();
+
+    // initialize the logger
+    let mut log_builder = pretty_env_logger::formatted_builder();
+    log_builder
+        .filter_level(app_settings.get_log_level())
+        .init();
+
     let port = app_settings.port;
 
     let redis_url = app_settings.get_redis_url();
@@ -45,14 +56,13 @@ async fn main() {
     tm.anaconda_cache = anaconda_cache;
 
     for (idx, rule) in app_settings.rules.iter().enumerate() {
-        println!("creating rule #{}: {:?}", idx, rule);
+        debug!("creating rule #{}: {:?}", idx, rule);
         let cache = create_cache_from_rule(rule, &policies, Some(redis_client.clone())).unwrap();
         tm.add_cache(idx, cache);
     }
 
     let shared_tm = Arc::new(tm);
     let api = filters::root(shared_tm);
-    println!("🎉 Server is running on 127.0.0.1:{}", port);
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
 
@@ -100,7 +110,12 @@ mod filters {
         shared_tm: SharedTaskManager,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         let log = warp::log::custom(|info| {
-            println!("🌐 {} {} {}", info.method(), info.path(), info.status(),);
+            info!(
+                "🌐 {} {} Response: {}",
+                info.method(),
+                info.path(),
+                info.status(),
+            );
         });
 
         pypi_index(shared_tm.clone())
@@ -185,7 +200,7 @@ mod handlers {
         match t.resolve(tm).await {
             Ok(data) => Ok(Response::builder().body(data)),
             Err(e) => {
-                eprintln!("{}", e);
+                error!("{}", e);
                 Err(warp::reject())
             }
         }
@@ -202,7 +217,7 @@ mod handlers {
         match t.resolve(tm).await {
             Ok(data) => Ok(Response::builder().body(data)),
             Err(e) => {
-                eprintln!("{}", e);
+                error!("{}", e);
                 Err(warp::reject())
             }
         }
@@ -213,14 +228,13 @@ mod handlers {
         tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
         // Dynamically dispatch tasks defined in config file
-        println!("matched fallback path: {}", path);
         let config = &tm.config;
         for (idx, rule) in config.rules.iter().enumerate() {
             let upstream = rule.upstream.clone();
             if let Some(rule_regex) = &rule.path {
                 let re = Regex::new(rule_regex).unwrap();
                 if re.is_match(&path) {
-                    println!("captured by rule #{}: {}", idx, rule_regex);
+                    trace!("captured by rule #{}: {}", idx, rule_regex);
                     let replaced = re.replace_all(&path, &upstream);
                     let t = Task::Others {
                         rule_id: idx,
@@ -245,7 +259,7 @@ mod test {
     use warp::Filter;
 
     fn get_settings() -> Settings {
-        println!(
+        info!(
             "{:?}",
             settings::Settings::new_from("config-test", "app_test").unwrap()
         );
