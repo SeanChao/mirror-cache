@@ -30,7 +30,7 @@ impl LruRedisCache {
     /// * `redis_client`: a redis client to manage the cache metadata
     /// * `id`: the cache id, required to be unique among all `LruRedisCache` instances
     pub fn new(root_dir: &str, size_limit: u64, redis_client: redis::Client, id: &str) -> Self {
-        println!(
+        debug!(
             "LRU Redis Cache init: size_limit={}, root_dir={}",
             size_limit, root_dir
         );
@@ -81,7 +81,7 @@ impl CachePolicy for LruRedisCache {
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
 
         if file_size > self.size_limit {
-            println!("skip cache for {}, because its size exceeds the limit", key);
+            info!("skip cache for {}, because its size exceeds the limit", key);
         }
         // evict cache entry if necessary
         let _tx_result = redis::transaction(
@@ -91,7 +91,7 @@ impl CachePolicy for LruRedisCache {
                 let mut cur_cache_size = self.get_total_size();
                 while cur_cache_size + file_size > self.size_limit {
                     // LRU eviction
-                    println!(
+                    trace!(
                         "current {} + new {} > limit {}",
                         con.get::<&str, Option<u64>>(&self.total_size_key())
                             .unwrap()
@@ -101,9 +101,9 @@ impl CachePolicy for LruRedisCache {
                     );
                     let pkg_to_remove: Vec<(String, u64)> =
                         con.zpopmin(&self.entries_zlist_key(), 1).unwrap();
-                    println!("pkg_to_remove: {:?}", pkg_to_remove);
+                    trace!("pkg_to_remove: {:?}", pkg_to_remove);
                     if pkg_to_remove.is_empty() {
-                        println!("some files need to be evicted but they are missing from redis filelist. The cache metadata is inconsistent.");
+                        info!("some files need to be evicted but they are missing from redis filelist. The cache metadata is inconsistent.");
                         return Err(redis::RedisError::from(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             "cache metadata inconsistent",
@@ -112,11 +112,12 @@ impl CachePolicy for LruRedisCache {
                     // remove from local fs and metadata in redis
                     for (f, _) in pkg_to_remove {
                         let path = self.to_fs_path(&f);
-                        println!("remove: {}", path);
-                        match fs::remove_file(path) {
-                            Ok(_) => {}
+                        match fs::remove_file(&path) {
+                            Ok(_) => {
+                                info!("LRU cache removed {}", &path);
+                            }
                             Err(e) => {
-                                println!("failed to remove file: {:?}", e);
+                                warn!("failed to remove file: {:?}", e);
                             }
                         };
                         let pkg_size: Option<u64> = con.hget(&f, "size").unwrap();
@@ -124,7 +125,7 @@ impl CachePolicy for LruRedisCache {
                         cur_cache_size = con
                             .decr::<&str, u64, u64>(&self.total_size_key(), pkg_size.unwrap_or(0))
                             .unwrap();
-                        println!("total_size -= {:?} -> {}", pkg_size, cur_cache_size);
+                        trace!("total_size -= {:?} -> {}", pkg_size, cur_cache_size);
                     }
                 }
                 Ok(Some(()))
@@ -145,15 +146,14 @@ impl CachePolicy for LruRedisCache {
             &self.total_size_key(),
             &self.entries_zlist_key(),
         );
-        println!("CACHE SET {} -> {:?}", &key, entry);
+        trace!("CACHE SET {} -> {:?}", &key, entry);
     }
 
     fn get(&self, key: &str) -> Option<BytesArray> {
         let key = &self.to_prefixed_key(key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         let cache_result = models::get_cache_entry(&mut sync_con, key).unwrap();
-        print!("CACHE GET {} -> {:?} ", key, &cache_result);
-        if let Some(_cache_entry) = cache_result {
+        if let Some(_cache_entry) = &cache_result {
             // cache hit
             // update cache entry in db
             let new_atime = util::now();
@@ -165,7 +165,7 @@ impl CachePolicy for LruRedisCache {
             ) {
                 Ok(_) => {}
                 Err(e) => {
-                    println!("Failed to update cache entry atime: {}", e);
+                    info!("Failed to update cache entry atime: {}", e);
                 }
             }
             let cached_file_path = self.to_fs_path(key);
@@ -174,11 +174,11 @@ impl CachePolicy for LruRedisCache {
                 Err(_) => vec![],
             };
             if file_content.len() > 0 {
-                println!("[HIT]");
+                trace!("CACHE GET [HIT] {} -> {:?} ", key, &cache_result);
                 return Some(file_content);
             }
         };
-        println!("[MISS]");
+        trace!("CACHE GET [MISS] {} -> {:?} ", key, &cache_result);
         None
     }
 }
@@ -199,7 +199,7 @@ impl TtlRedisCache {
         let cloned_client = redis_client.clone();
         let cloned_root_dir = String::from(root_dir);
         std::thread::spawn(move || {
-            println!("TTL expiration listener is created!");
+            debug!("TTL expiration listener is created!");
             loop {
                 let mut con = cloned_client.get_connection().unwrap();
                 let mut pubsub = con.as_pubsub();
@@ -207,7 +207,7 @@ impl TtlRedisCache {
                 match pubsub.psubscribe("__keyevent*__:expired") {
                     Ok(_) => {}
                     Err(e) => {
-                        eprintln!("Failed to psubscribe: {}", e);
+                        error!("Failed to psubscribe: {}", e);
                         continue;
                     }
                 }
@@ -216,7 +216,7 @@ impl TtlRedisCache {
                         Ok(msg) => {
                             let payload: String = msg.get_payload().unwrap();
                             let cache_key = Self::from_redis_key(&cloned_root_dir, &payload);
-                            println!(
+                            trace!(
                                 "channel '{}': {}, pkg: {}",
                                 msg.get_channel_name(),
                                 payload,
@@ -224,16 +224,18 @@ impl TtlRedisCache {
                             );
                             let file_path = Self::to_fs_path(&cloned_root_dir, &cache_key);
                             match fs::remove_file(&file_path) {
-                                Ok(_) => {}
+                                Ok(_) => {
+                                    info!("TTL cache removed {}", file_path);
+                                }
                                 Err(e) => {
                                     if e.kind() == std::io::ErrorKind::NotFound {
-                                        // eprintln!("Failed to remove {}: {}", &file_path, e);
+                                        // warn!("Failed to remove {}: {}", &file_path, e);
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to get_message: {}", e);
+                            error!("Failed to get_message: {}", e);
                         }
                     }
                 }
@@ -271,16 +273,16 @@ impl CachePolicy for TtlRedisCache {
         match models::set(&mut sync_con, &redis_key, "") {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("set cache entry for {} failed: {}", key, e);
+                error!("set cache entry for {} failed: {}", key, e);
             }
         }
         match models::expire(&mut sync_con, &redis_key, self.ttl as usize) {
             Ok(_) => {}
             Err(e) => {
-                eprintln!("set cache entry ttl for {} failed: {}", key, e);
+                error!("set cache entry ttl for {} failed: {}", key, e);
             }
         }
-        println!("CACHE SET {} TTL={}", &key, self.ttl);
+        trace!("CACHE SET {} TTL={}", &key, self.ttl);
     }
 
     fn get(&self, key: &str) -> Option<BytesArray> {
@@ -295,7 +297,7 @@ impl CachePolicy for TtlRedisCache {
                         Err(_) => vec![],
                     };
                     if file_content.len() > 0 {
-                        println!("GET {} [HIT]", key);
+                        trace!("GET {} [HIT]", key);
                         return Some(file_content);
                     }
                     None
@@ -303,7 +305,7 @@ impl CachePolicy for TtlRedisCache {
                 None => None,
             },
             Err(e) => {
-                println!("get cache entry key={} failed: {}", key, e);
+                info!("get cache entry key={} failed: {}", key, e);
                 None
             }
         }

@@ -1,6 +1,7 @@
 port: 9001
 debug: true
-url: https://localhost:9001 # url of deployed app
+url: https://localhost:9001
+log_level: trace
 
 redis:
   url: redis://localhost:3001

@@ -1,11 +1,9 @@
 use crate::cache;
 use crate::cache::CachePolicy;
 use crate::cache::NoCache;
-use crate::error::Error::*;
 use crate::error::Result;
 use crate::settings::Settings;
 use crate::util;
-use reqwest::ClientBuilder;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -49,16 +47,18 @@ impl Task {
             }
         };
         if let Some(data) = cache_result {
-            println!("[Request] {:?} [HIT]", &self);
+            info!("[Request] [HIT] {:?}", &self);
             return Ok(data);
         }
         // cache miss, dispatch async cache task
         let _ = tm.add_task(self.clone()).await;
         // fetch from upstream
-        let client = ClientBuilder::new().build().unwrap();
         let remote_url = tm.resolve_task_upstream(&self);
-        println!("[Request] {:?} fetching from: {}", &self, &remote_url);
-        let resp = client.get(remote_url).send().await;
+        info!(
+            "[Request] [MISS] {:?} fetching from upstream: {}",
+            &self, &remote_url
+        );
+        let resp = util::make_request(&remote_url).await;
         match resp {
             Ok(res) => match &self {
                 Task::PypiIndexTask { .. } => {
@@ -72,14 +72,11 @@ impl Task {
                         Ok(text_content.as_bytes().to_vec())
                     }
                 }
-                _ => {
-                    println!("[Request] {:?} ✔ fetched {:?}", &self, res.content_length());
-                    Ok(res.bytes().await.unwrap().to_vec())
-                }
+                _ => Ok(res.bytes().await.unwrap().to_vec()),
             },
             Err(e) => {
-                eprintln!("[Request] {:?} failed to fetch upstream: {}", &self, e);
-                Err(RequestError(e))
+                error!("[Request] {:?} failed to fetch upstream: {}", &self, e);
+                Err(e)
             }
         }
     }
@@ -129,11 +126,11 @@ impl TaskManager {
     // add a task into task list
     async fn add_task(&self, task: Task) {
         if self.task_set.read().await.contains(&task) {
-            println!("[TASK] ignored existing task: {:?}", task);
+            info!("[TASK] ignored existing task: {:?}", task);
             return;
         }
         self.task_set.write().await.insert(task.clone());
-        println!(
+        info!(
             "[TASK] [len={}] + {:?}",
             self.task_set.read().await.len(),
             task
@@ -161,8 +158,7 @@ impl TaskManager {
         let upstream_url = self.resolve_task_upstream(&task_clone);
         let task_list_ptr = self.task_set.clone();
         tokio::spawn(async move {
-            let client = ClientBuilder::new().build().unwrap();
-            let resp = client.get(upstream_url).send().await;
+            let resp = util::make_request(&upstream_url).await;
             match resp {
                 Ok(res) => {
                     if rewrite {
@@ -174,10 +170,9 @@ impl TaskManager {
                     } else {
                         c.put(&task_clone.to_key(), res.bytes().await.unwrap().to_vec());
                     }
-                    println!("[TASK] ✔ {:?}", task_clone);
                 }
                 Err(e) => {
-                    eprintln!("[TASK] ❌ failed to fetch upstream: {}", e);
+                    error!("[TASK] ❌ failed to fetch upstream: {}", e);
                 }
             };
             task_list_ptr.write().await.remove(&task_clone);
@@ -192,7 +187,7 @@ impl TaskManager {
             Task::Others { rule_id, .. } => match self.get_cache_for_cache_rule(*rule_id) {
                 Some(cache) => cache.get(key),
                 None => {
-                    eprintln!("Failed to get cache for rule #{} from cache map", rule_id);
+                    error!("Failed to get cache for rule #{} from cache map", rule_id);
                     None
                 }
             },

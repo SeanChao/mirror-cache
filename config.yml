@@ -1,6 +1,8 @@
 port: 9000
 debug: true
 url: http://localhost:9000 # url of this app
+# log level: error / warn / info / debug / trace, default level is info
+log_level: debug
 
 redis:
   url: redis://localhost
