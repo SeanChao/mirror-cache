@@ -1,5 +1,6 @@
 mod cache;
 mod error;
+mod metric;
 mod models;
 mod settings;
 mod task;
@@ -13,6 +14,9 @@ use crate::settings::PolicyType;
 use crate::settings::Rule;
 use crate::task::SharedTaskManager;
 use crate::task::TaskManager;
+use metrics::increment_counter;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_util::MetricKindMask;
 use regex::Regex;
 use std::sync::Arc;
 
@@ -30,6 +34,7 @@ async fn main() {
     // initialize the logger
     let mut log_builder = pretty_env_logger::formatted_builder();
     log_builder
+        .filter_module("hyper::proto", log::LevelFilter::Error) // hide excessive logs
         .filter_level(app_settings.get_log_level())
         .init();
 
@@ -63,6 +68,20 @@ async fn main() {
 
     let shared_tm = Arc::new(tm);
     let api = filters::root(shared_tm);
+
+    // init metrics
+    let builder = PrometheusBuilder::new();
+    builder
+        .idle_timeout(
+            MetricKindMask::COUNTER | MetricKindMask::HISTOGRAM,
+            Some(std::time::Duration::from_secs(10)),
+        )
+        .listen_address(([127, 0, 0, 1], port + 1))
+        .install()
+        .expect("failed to install Prometheus recorder");
+    metric::register_counters();
+    // metric::R
+
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
 
@@ -179,12 +198,19 @@ mod handlers {
         path: String,
         tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
+        increment_counter!(metric::COUNTER_PYPI_INDEX_REQUESTS);
         let tw = Task::PypiIndexTask { pkg_name: path };
         match tw.resolve(tm).await {
-            Ok(data) => Ok(Response::builder()
-                .header("content-type", "text/html")
-                .body(data)),
-            Err(_) => Err(warp::reject()),
+            Ok(data) => {
+                increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_SUCCESS);
+                Ok(Response::builder()
+                    .header("content-type", "text/html")
+                    .body(data))
+            }
+            Err(_) => {
+                increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_FAILURE);
+                Err(warp::reject())
+            }
         }
     }
 
@@ -195,6 +221,7 @@ mod handlers {
         seg3: String,
         tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
+        increment_counter!(metric::COUNTER_PYPI_PKGS_REQ);
         let fullpath = format!("{}/{}/{}/{}", seg0, seg1, seg2, seg3);
         let t = Task::PypiPackagesTask { pkg_path: fullpath };
         match t.resolve(tm).await {
@@ -212,6 +239,7 @@ mod handlers {
         filename: String,
         tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
+        increment_counter!(metric::COUNTER_ANACONDA_REQ);
         let cache_key = format!("{}/{}/{}", channel, arch, filename);
         let t = Task::AnacondaTask { path: cache_key };
         match t.resolve(tm).await {

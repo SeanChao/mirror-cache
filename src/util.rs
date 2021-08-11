@@ -1,5 +1,7 @@
 use crate::error::Error;
 use crate::error::Result;
+use crate::metric;
+use metrics::increment_counter;
 use reqwest::ClientBuilder;
 
 pub fn now() -> i64 {
@@ -29,14 +31,19 @@ pub fn pypi_index_rewrite(input: &str, base_url: &str) -> String {
 }
 
 pub async fn make_request(url: &str) -> Result<reqwest::Response> {
+    increment_counter!(metric::CNT_OUT_REQUESTS);
     let client = ClientBuilder::new().build().unwrap();
     let resp = client.get(url).send().await;
     match resp {
         Ok(res) => {
             debug!("outbound request: {:?} {:?}", res.status(), res.headers());
+            increment_counter!(metric::CNT_OUT_REQUESTS_SUCCESS);
             Ok(res)
         }
-        Err(e) => Err(Error::RequestError(e)),
+        Err(e) => {
+            increment_counter!(metric::CNT_OUT_REQUESTS_FAILURE);
+            Err(Error::RequestError(e))
+        }
     }
 }
 

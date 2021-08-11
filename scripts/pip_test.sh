@@ -5,9 +5,10 @@ docker pull python
 docker \
 	run \
 	--network host \
+	--rm \
 	python \
 	python -m \
-	pip install \
+	pip download \
 	-i ${MIRROR} \
 	--disable-pip-version-check \
 	--retries 0 \

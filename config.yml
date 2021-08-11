@@ -1,8 +1,7 @@
 port: 9000
-debug: true
 url: http://localhost:9000 # url of this app
 # log level: error / warn / info / debug / trace, default level is info
-log_level: debug
+log_level: info
 
 redis:
   url: redis://localhost
@@ -12,7 +11,7 @@ builtin:
     policy: "policy_ttl_60"
     upstream: "https://pypi.org/simple"
   pypi_packages:
-    policy: "policy_lru_8G"
+    policy: "policy_lru"
     upstream: "https://files.pythonhosted.org/packages"
   anaconda:
     policy: "policy_ttl_60"
@@ -29,9 +28,9 @@ policies:
     type: TTL
     path: "cache/ttl"
     timeout: 60
-  - name: policy_lru_8G
+  - name: policy_lru
     type: LRU
-    size: 8589934592
+    size: 1073741824
     path: "cache/lru"
   - name: policy_ubuntu
     type: LRU

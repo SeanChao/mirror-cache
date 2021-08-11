@@ -60,3 +60,9 @@ scenario_test:
 	zx ./scripts/pip_test.mjs
 	zx ./scripts/conda_test.mjs
 	zx ./scripts/concurrent.mjs
+
+metrics:
+	docker run -d --rm --network host -v $$PWD/prom.yml:/srv/prom.yml:ro --name metrics prom/prometheus --config.file /srv/prom.yml
+
+metrics_stop:
+	docker stop metrics
