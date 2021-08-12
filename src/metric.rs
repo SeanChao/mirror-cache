@@ -27,35 +27,53 @@ pub static CNT_RM_FILES: &str = "files_removed";
 pub fn register_counters() {
     register_counter!(
         COUNTER_PYPI_INDEX_REQUESTS,
-        "The number of requests to PyPI index page."
+        "The number of requests to PyPI index endpoint."
     );
-    register_counter!(COUNTER_PYPI_INDEX_REQ_SUCCESS);
-    register_counter!(COUNTER_PYPI_INDEX_REQ_FAILURE);
+    register_counter!(
+        COUNTER_PYPI_INDEX_REQ_SUCCESS,
+        "The number of successful requests to PyPI index endpoint."
+    );
+    register_counter!(
+        COUNTER_PYPI_INDEX_REQ_FAILURE,
+        "The number of failed requests to PyPI index endpoint."
+    );
     register_counter!(
         COUNTER_PYPI_PKGS_REQ,
         "The number of requests to PyPI packages endpoint."
     );
     register_counter!(COUNTER_ANACONDA_REQ, "The number of requests to Anaconda.");
-    register_counter!(COUNTER_CACHE_HIT);
-    register_counter!(COUNTER_CACHE_MISS);
-    register_counter!(CNT_PYPI_INDEX_CACHE_HIT);
-    register_counter!(CNT_PYPI_INDEX_CACHE_MISS);
-    register_counter!(CNT_PYPI_PKGS_CACHE_HIT);
-    register_counter!(CNT_PYPI_PKGS_CACHE_MISS);
-    register_counter!(CNT_ANACONDA_CACHE_HIT);
-    register_counter!(CNT_ANACONDA_CACHE_MISS);
+    register_counter!(COUNTER_CACHE_HIT, "Overall cache hit count.");
+    register_counter!(COUNTER_CACHE_MISS, "Overall cache miss count.");
+    register_counter!(CNT_PYPI_INDEX_CACHE_HIT, "PyPI index cache hit count.");
+    register_counter!(CNT_PYPI_INDEX_CACHE_MISS, "PyPI index cache miss count.");
+    register_counter!(CNT_PYPI_PKGS_CACHE_HIT, "PyPI packages cache hit count.");
+    register_counter!(CNT_PYPI_PKGS_CACHE_MISS, "PyPI packages cache miss count.");
+    register_counter!(CNT_ANACONDA_CACHE_HIT, "Anaconda cache hit count.");
+    register_counter!(CNT_ANACONDA_CACHE_MISS, "Anaconda cache miss count.");
     register_counter!(
         COUNTER_TASKS_BG,
         "The number of background download tasks spawned."
     );
-    register_counter!(CNT_TASKS_BG_SUCCESS);
-    register_counter!(CNT_TASKS_BG_FAILURE);
+    register_counter!(
+        CNT_TASKS_BG_SUCCESS,
+        "The number of successful background download tasks."
+    );
+    register_counter!(
+        CNT_TASKS_BG_FAILURE,
+        "The number of failed background download tasks."
+    );
     register_counter!(CNT_OUT_REQUESTS, "The number of outbound requests.");
-    register_counter!(CNT_OUT_REQUESTS_SUCCESS);
-    register_counter!(CNT_OUT_REQUESTS_FAILURE);
+    register_counter!(
+        CNT_OUT_REQUESTS_SUCCESS,
+        "The number of successful outbound requests."
+    );
+    register_counter!(
+        CNT_OUT_REQUESTS_FAILURE,
+        "The number of failed outbound requests."
+    );
     register_histogram!(
         HG_TASKS_LEN,
         "The current size of background download task set."
     );
-    register_counter!(CNT_RM_FILES);
+    register_counter!(CNT_RM_FILES, "The number of removed files.");
 }
