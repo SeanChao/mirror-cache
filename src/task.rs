@@ -2,8 +2,10 @@ use crate::cache;
 use crate::cache::CachePolicy;
 use crate::cache::NoCache;
 use crate::error::Result;
+use crate::metric;
 use crate::settings::Settings;
 use crate::util;
+use metrics::{histogram, increment_counter};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -27,17 +29,26 @@ impl Task {
         match &self {
             Task::PypiIndexTask { .. } => {
                 if let Some(bytes) = tm.get(&self, &key) {
+                    increment_counter!(metric::CNT_PYPI_INDEX_CACHE_HIT);
                     cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_PYPI_INDEX_CACHE_MISS);
                 }
             }
             Task::PypiPackagesTask { .. } => {
                 if let Some(bytes) = tm.get(&self, &key) {
+                    increment_counter!(metric::CNT_PYPI_PKGS_CACHE_HIT);
                     cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_PYPI_PKGS_CACHE_MISS);
                 }
             }
             Task::AnacondaTask { .. } => {
                 if let Some(bytes) = tm.get(&self, &key) {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
                     cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_MISS);
                 }
             }
             Task::Others { .. } => {
@@ -48,9 +59,11 @@ impl Task {
         };
         if let Some(data) = cache_result {
             info!("[Request] [HIT] {:?}", &self);
+            increment_counter!(metric::COUNTER_CACHE_HIT);
             return Ok(data);
         }
         // cache miss, dispatch async cache task
+        increment_counter!(metric::COUNTER_CACHE_MISS);
         let _ = tm.add_task(self.clone()).await;
         // fetch from upstream
         let remote_url = tm.resolve_task_upstream(&self);
@@ -123,18 +136,34 @@ impl TaskManager {
         }
     }
 
+    async fn taskset_contains(&self, t: &Task) -> bool {
+        self.task_set.read().await.contains(t)
+    }
+
+    async fn taskset_add(&self, t: Task) {
+        self.task_set.write().await.insert(t);
+    }
+
+    async fn taskset_remove(task_set: Arc<RwLock<HashSet<Task>>>, t: &Task) {
+        task_set.write().await.remove(t);
+    }
+
+    async fn taskset_len(task_set: Arc<RwLock<HashSet<Task>>>) -> usize {
+        let len = task_set.read().await.len();
+        histogram!(metric::HG_TASKS_LEN, len as f64);
+        len
+    }
+
     // add a task into task list
     async fn add_task(&self, task: Task) {
-        if self.task_set.read().await.contains(&task) {
+        increment_counter!(metric::COUNTER_TASKS_BG);
+        if self.taskset_contains(&task).await {
             info!("[TASK] ignored existing task: {:?}", task);
             return;
         }
-        self.task_set.write().await.insert(task.clone());
-        info!(
-            "[TASK] [len={}] + {:?}",
-            self.task_set.read().await.len(),
-            task
-        );
+        self.taskset_add(task.clone()).await;
+        let task_set_len = Self::taskset_len(self.task_set.clone()).await;
+        info!("[TASK] [len={}] + {:?}", task_set_len, task);
         let c;
         let mut rewrite = false;
         let mut to_url = None;
@@ -157,25 +186,39 @@ impl TaskManager {
         let task_clone = task.clone();
         let upstream_url = self.resolve_task_upstream(&task_clone);
         let task_list_ptr = self.task_set.clone();
+        // spawn an async download task
         tokio::spawn(async move {
             let resp = util::make_request(&upstream_url).await;
             match resp {
                 Ok(res) => {
                     if rewrite {
-                        let mut content = res.text().await.unwrap();
+                        let content = res.text().await.ok();
+                        if content.is_none() {
+                            increment_counter!(metric::CNT_TASKS_BG_FAILURE);
+                            return;
+                        }
+                        let mut content = content.unwrap();
                         if let Some(to_url) = to_url {
                             content = task_clone.rewrite_upstream(content, &to_url);
                         };
                         c.put(&task_clone.to_key(), content.as_bytes().to_vec());
                     } else {
-                        c.put(&task_clone.to_key(), res.bytes().await.unwrap().to_vec());
+                        let bytes = res.bytes().await.ok();
+                        if bytes.is_none() {
+                            increment_counter!(metric::CNT_TASKS_BG_FAILURE);
+                            return;
+                        }
+                        c.put(&task_clone.to_key(), bytes.unwrap().to_vec());
                     }
+                    increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                 }
                 Err(e) => {
+                    increment_counter!(metric::CNT_TASKS_BG_FAILURE);
                     error!("[TASK] ❌ failed to fetch upstream: {}", e);
                 }
             };
-            task_list_ptr.write().await.remove(&task_clone);
+            Self::taskset_remove(task_list_ptr.clone(), &task_clone).await;
+            Self::taskset_len(task_list_ptr).await;
         });
     }
 

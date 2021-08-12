@@ -1,9 +1,11 @@
+use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use std::fs;
 use std::io::prelude::*;
 use std::marker::Send;
 use std::vec::Vec;
 
+use crate::metric;
 use crate::models;
 use crate::util;
 
@@ -31,9 +33,11 @@ impl LruRedisCache {
     /// * `id`: the cache id, required to be unique among all `LruRedisCache` instances
     pub fn new(root_dir: &str, size_limit: u64, redis_client: redis::Client, id: &str) -> Self {
         debug!(
-            "LRU Redis Cache init: size_limit={}, root_dir={}",
-            size_limit, root_dir
+            "LRU Redis Cache init: id={} size_limit={}, root_dir={}",
+            id, size_limit, root_dir
         );
+        register_histogram!(Self::get_metric_key(id));
+        println!("registered: {}", Self::get_metric_key(id));
         Self {
             root_dir: String::from(root_dir),
             size_limit,
@@ -50,7 +54,10 @@ impl LruRedisCache {
     fn get_total_size(&self) -> u64 {
         let key = self.total_size_key();
         let mut con = self.redis_client.get_connection().unwrap();
-        con.get::<&str, Option<u64>>(&key).unwrap().unwrap_or(0)
+        let size = con.get::<&str, Option<u64>>(&key).unwrap().unwrap_or(0);
+        histogram!(Self::get_metric_key(&self.id), size as f64);
+        println!("logged: {} {}", Self::get_metric_key(&self.id), size as f64);
+        size
     }
 
     fn total_size_key(&self) -> String {
@@ -64,6 +71,10 @@ impl LruRedisCache {
 
     fn to_prefixed_key(&self, cache_key: &str) -> String {
         format!("{}_{}", self.id, cache_key)
+    }
+
+    fn get_metric_key(id: &str) -> String {
+        format!("{}_{}", metric::HG_CACHE_SIZE_PREFIX, id)
     }
 }
 
@@ -114,6 +125,7 @@ impl CachePolicy for LruRedisCache {
                         let path = self.to_fs_path(&f);
                         match fs::remove_file(&path) {
                             Ok(_) => {
+                                increment_counter!(metric::CNT_RM_FILES);
                                 info!("LRU cache removed {}", &path);
                             }
                             Err(e) => {
@@ -225,6 +237,7 @@ impl TtlRedisCache {
                             let file_path = Self::to_fs_path(&cloned_root_dir, &cache_key);
                             match fs::remove_file(&file_path) {
                                 Ok(_) => {
+                                    increment_counter!(metric::CNT_RM_FILES);
                                     info!("TTL cache removed {}", file_path);
                                 }
                                 Err(e) => {
