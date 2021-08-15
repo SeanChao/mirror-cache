@@ -7,6 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bytes = "1.0"
 chrono = "0.4"
 config = "0.11"
 futures = "0.3"
@@ -17,7 +18,7 @@ metrics-util = "0.10"
 pretty_env_logger = "0.4"
 redis = { version = "0.21", features = ["aio", "tokio-comp"] }
 regex = "1.5"
-reqwest = "0.11"
+reqwest = { version = "0.11", features = ["stream"] }
 thiserror = "1.0"
 tokio = { version = "1", features = ["full"] }
 serde_derive = "^1.0"

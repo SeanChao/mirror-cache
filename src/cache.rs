@@ -9,11 +9,11 @@ use crate::metric;
 use crate::models;
 use crate::util;
 
-pub type BytesArray = Vec<u8>;
+use bytes::Bytes;
 
 pub trait CachePolicy: Sync + Send {
-    fn put(&self, key: &str, entry: BytesArray);
-    fn get(&self, key: &str) -> Option<BytesArray>;
+    fn put(&self, key: &str, entry: Bytes);
+    fn get(&self, key: &str) -> Option<Bytes>;
 }
 
 #[derive(Clone)]
@@ -85,7 +85,7 @@ impl CachePolicy for LruRedisCache {
      * If the size limit is exceeded after putting the entry, LRU eviction will run.
      * This function handles both local FS data and redis metadata.
      */
-    fn put(&self, key: &str, entry: BytesArray) {
+    fn put(&self, key: &str, entry: Bytes) {
         let key = &self.to_prefixed_key(key);
         // eviction policy
         let file_size = entry.len() as u64;
@@ -161,7 +161,7 @@ impl CachePolicy for LruRedisCache {
         trace!("CACHE SET {} -> {:?}", &key, entry);
     }
 
-    fn get(&self, key: &str) -> Option<BytesArray> {
+    fn get(&self, key: &str) -> Option<Bytes> {
         let key = &self.to_prefixed_key(key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         let cache_result = models::get_cache_entry(&mut sync_con, key).unwrap();
@@ -187,7 +187,7 @@ impl CachePolicy for LruRedisCache {
             };
             if file_content.len() > 0 {
                 trace!("CACHE GET [HIT] {} -> {:?} ", key, &cache_result);
-                return Some(file_content);
+                return Some(Bytes::from(file_content));
             }
         };
         trace!("CACHE GET [MISS] {} -> {:?} ", key, &cache_result);
@@ -274,7 +274,7 @@ impl TtlRedisCache {
 }
 
 impl CachePolicy for TtlRedisCache {
-    fn put(&self, key: &str, entry: BytesArray) {
+    fn put(&self, key: &str, entry: Bytes) {
         let redis_key = Self::to_redis_key(&self.root_dir, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         let data_to_write = entry;
@@ -298,7 +298,7 @@ impl CachePolicy for TtlRedisCache {
         trace!("CACHE SET {} TTL={}", &key, self.ttl);
     }
 
-    fn get(&self, key: &str) -> Option<BytesArray> {
+    fn get(&self, key: &str) -> Option<Bytes> {
         let redis_key = Self::to_redis_key(&self.root_dir, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         match models::get(&mut sync_con, &redis_key) {
@@ -311,7 +311,7 @@ impl CachePolicy for TtlRedisCache {
                     };
                     if file_content.len() > 0 {
                         trace!("GET {} [HIT]", key);
-                        return Some(file_content);
+                        return Some(Bytes::from(file_content));
                     }
                     None
                 }
@@ -365,8 +365,8 @@ impl CacheEntry<LruCacheMetadata, String, ()> {
 pub struct NoCache {}
 
 impl CachePolicy for NoCache {
-    fn put(&self, _key: &str, _entry: BytesArray) {}
-    fn get(&self, _key: &str) -> Option<BytesArray> {
+    fn put(&self, _key: &str, _entry: Bytes) {}
+    fn get(&self, _key: &str) -> Option<Bytes> {
         None
     }
 }
@@ -427,7 +427,7 @@ mod tests {
         );
         let key = "answer";
         let cached_data = vec![42];
-        lru_cache.put("answer", cached_data.clone());
+        lru_cache.put("answer", cached_data.as_slice().into());
         let total_size_expected = cached_data.len() as u64;
         let total_size_actual: u64 = lru_cache.get_total_size();
         let cached_data_actual = get_file_all(&format!("{}/{}", TEST_CACHE_DIR, key));
