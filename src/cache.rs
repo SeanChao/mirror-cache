@@ -4,6 +4,7 @@ use crate::models;
 use crate::storage::Storage;
 use crate::util;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
@@ -12,14 +13,12 @@ use std::fmt;
 use std::fs;
 use std::io::prelude::*;
 use std::marker::Send;
-use std::pin::Pin;
 use std::vec::Vec;
 
 pub enum CacheData {
     TextData(String),
     BytesData(Bytes),
-    #[allow(dead_code)] // TODO: use it
-    ByteStream(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + Sync>>),
+    ByteStream(Box<dyn Stream<Item = Result<Bytes>> + Send + Sync + Unpin>),
 }
 
 impl CacheData {
@@ -87,8 +86,9 @@ impl fmt::Debug for CacheData {
     }
 }
 
+#[async_trait]
 pub trait CachePolicy: Sync + Send {
-    fn put(&self, key: &str, entry: CacheData);
+    async fn put(&self, key: &str, entry: CacheData);
     fn get(&self, key: &str) -> Option<CacheData>;
 }
 
@@ -132,7 +132,6 @@ impl LruRedisCache {
         let mut con = self.redis_client.get_connection().unwrap();
         let size = con.get::<&str, Option<u64>>(&key).unwrap().unwrap_or(0);
         histogram!(Self::get_metric_key(&self.id), size as f64);
-        println!("logged: {} {}", Self::get_metric_key(&self.id), size as f64);
         size
     }
 
@@ -154,6 +153,7 @@ impl LruRedisCache {
     }
 }
 
+#[async_trait]
 impl CachePolicy for LruRedisCache {
     /**
      * put a cache entry with given `key` as key and `entry` as value
@@ -161,7 +161,7 @@ impl CachePolicy for LruRedisCache {
      * If the size limit is exceeded after putting the entry, LRU eviction will run.
      * This function handles both local FS data and redis metadata.
      */
-    fn put(&self, key: &str, entry: CacheData) {
+    async fn put(&self, key: &str, mut entry: CacheData) {
         let filename = key;
         let redis_key = &self.to_prefixed_key(key);
         // eviction policy
@@ -224,7 +224,7 @@ impl CachePolicy for LruRedisCache {
             },
         );
         // cache to local filesystem
-        self.storage.persist(filename, &entry);
+        self.storage.persist(filename, &mut entry).await;
         let entry = &CacheEntry::new(&redis_key, entry.len() as u64);
         let _redis_resp_str = models::set_lru_cache_entry(
             &mut sync_con,
@@ -348,8 +348,9 @@ impl TtlRedisCache {
     }
 }
 
+#[async_trait]
 impl CachePolicy for TtlRedisCache {
-    fn put(&self, key: &str, entry: CacheData) {
+    async fn put(&self, key: &str, entry: CacheData) {
         let redis_key = Self::to_redis_key(&self.root_dir, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         let data_to_write: &[u8] = entry.as_ref();
@@ -439,8 +440,9 @@ impl CacheEntry<LruCacheMetadata, String, ()> {
 
 pub struct NoCache {}
 
+#[async_trait]
 impl CachePolicy for NoCache {
-    fn put(&self, _key: &str, _entry: CacheData) {}
+    async fn put(&self, _key: &str, _entry: CacheData) {}
     fn get(&self, _key: &str) -> Option<CacheData> {
         None
     }
@@ -485,6 +487,12 @@ mod tests {
         };
     }
 
+    macro_rules! cache_put {
+        ($cache: ident, $k: expr, $v: expr) => {
+            $cache.put($k, $v).await;
+        };
+    }
+
     #[test]
     fn lru_prefix_key() {
         let lru_cache =
@@ -492,8 +500,8 @@ mod tests {
         assert_eq!(lru_cache.to_prefixed_key("April"), "prefix_key_test_April")
     }
 
-    #[test]
-    fn test_cache_entry_set_success() {
+    #[tokio::test]
+    async fn test_cache_entry_set_success() {
         let redis_client = new_redis_client();
         let lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
@@ -504,7 +512,7 @@ mod tests {
         let key = "answer";
         let cached_data = vec![42];
         let len = cached_data.len();
-        lru_cache.put("answer", cached_data.clone().into());
+        cache_put!(lru_cache, "answer", cached_data.clone().into());
         let total_size_expected = len as u64;
         let total_size_actual: u64 = lru_cache.get_total_size();
         let cached_data_actual = get_file_all(&format!("{}/{}", TEST_CACHE_DIR, key));
@@ -513,8 +521,8 @@ mod tests {
         assert_eq!(&cached_data_actual, &cached_data);
     }
 
-    #[test]
-    fn lru_cache_size_constraint() {
+    #[tokio::test]
+    async fn lru_cache_size_constraint() {
         let redis_client = new_redis_client();
         let lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
@@ -522,11 +530,11 @@ mod tests {
             redis_client,
             "lru_cache_size_constraint"
         );
-        lru_cache.put("tsu_ki", vec![0; 5].into());
+        cache_put!(lru_cache, "tsu_ki", vec![0; 5].into());
         let total_size_actual: u64 = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 5);
         thread::sleep(time::Duration::from_secs(1));
-        lru_cache.put("kirei", vec![0; 11].into());
+        cache_put!(lru_cache, "kirei", vec![0; 11].into());
         let total_size_actual: u64 = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 16);
         assert_eq!(
@@ -538,14 +546,14 @@ mod tests {
             vec![0; 11]
         );
         // cache is full, evict tsu_ki
-        lru_cache.put("suki", vec![1; 4].into());
+        cache_put!(lru_cache, "suki", vec![1; 4].into());
         assert_eq!(lru_cache.get_total_size(), 15);
         assert_eq!(
             file_not_exist(&format!("{}/{}", TEST_CACHE_DIR, "tsu_ki")),
             true
         );
         // evict both
-        lru_cache.put("deadbeef", vec![2; 16].into());
+        cache_put!(lru_cache, "deadbeef", vec![2; 16].into());
         assert_eq!(lru_cache.get_total_size(), 16);
         assert_eq!(
             file_not_exist(&format!("{}/{}", TEST_CACHE_DIR, "kirei")),
@@ -561,8 +569,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_lru_cache_no_evict_recent() {
+    #[tokio::test]
+    async fn test_lru_cache_no_evict_recent() {
         let redis_client = new_redis_client();
         let lru_cache =
             new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client, "lru_no_evict_recent");
@@ -570,15 +578,15 @@ mod tests {
         let key2 = "2晚上住旅店";
         let key3 = "3三号去餐厅";
         let key4 = "4然后看电影";
-        lru_cache.put(key1, vec![1].into());
+        cache_put!(lru_cache, key1, vec![1].into());
         thread::sleep(time::Duration::from_secs(1));
-        lru_cache.put(key2, vec![2].into());
+        cache_put!(lru_cache, key2, vec![2].into());
         thread::sleep(time::Duration::from_secs(1));
-        lru_cache.put(key3, vec![3].into());
+        cache_put!(lru_cache, key3, vec![3].into());
         assert_eq!(lru_cache.get_total_size(), 3);
         // set key4, evict key1
         thread::sleep(time::Duration::from_secs(1));
-        lru_cache.put(key4, vec![4].into());
+        cache_put!(lru_cache, key4, vec![4].into());
         assert!(lru_cache.get(key1).is_none());
         // assert
         assert_eq!(lru_cache.get_total_size(), 3);
@@ -588,22 +596,21 @@ mod tests {
         assert_eq!(lru_cache.get_total_size(), 3);
         // set key1, evict key3
         thread::sleep(time::Duration::from_secs(1));
-        lru_cache.put(key1, vec![11].into());
+        cache_put!(lru_cache, key1, vec![11].into());
         assert_eq!(lru_cache.get_total_size(), 3);
         assert!(lru_cache.get(key3).is_none());
         assert_eq!(lru_cache.get_total_size(), 3);
     }
 
-    #[test]
-    // #[serial]
-    fn test_atime_updated_upon_access() {
+    #[tokio::test]
+    async fn test_atime_updated_upon_access() {
         let redis_client = new_redis_client();
         let redis_client_tester = new_redis_client();
         let mut con = redis_client_tester.get_connection().unwrap();
         let lru_cache =
             new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client, "atime_updated_upon_access");
         let key = "Shire";
-        lru_cache.put(key, vec![0].into());
+        cache_put!(lru_cache, key, vec![0].into());
         let atime_before: i64 = con.hget(lru_cache.to_prefixed_key(key), "atime").unwrap();
         thread::sleep(time::Duration::from_secs(1));
         lru_cache.get(key);
@@ -611,8 +618,8 @@ mod tests {
         assert_eq!(atime_before < atime_after, true);
     }
 
-    #[test]
-    fn key_update_total_size() {
+    #[tokio::test]
+    async fn key_update_total_size() {
         let redis_client = new_redis_client();
         let lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
@@ -621,14 +628,14 @@ mod tests {
             "key_update_no_change_total_size"
         );
         let key = "Phantom";
-        lru_cache.put(key, vec![0].into());
+        cache_put!(lru_cache, key, vec![0].into());
         assert_eq!(lru_cache.get_total_size(), 1);
-        lru_cache.put(key, vec![0, 1].into());
+        cache_put!(lru_cache, key, vec![0, 1].into());
         assert_eq!(lru_cache.get_total_size(), 2);
     }
 
-    #[test]
-    fn lru_cache_isolation() {
+    #[tokio::test]
+    async fn lru_cache_isolation() {
         let lru_cache_1 = new_lru_redis_cache!(
             &format!("{}/{}", TEST_CACHE_DIR, "1"),
             3,
@@ -641,8 +648,8 @@ mod tests {
             new_redis_client(),
             "cache_isolation_2"
         );
-        lru_cache_1.put("1", vec![1].into());
-        lru_cache_2.put("2", vec![2].into());
+        cache_put!(lru_cache_1, "1", vec![1].into());
+        cache_put!(lru_cache_2, "2", vec![2].into());
         assert_eq!(lru_cache_1.get_total_size(), 1);
         assert_eq!(lru_cache_2.get_total_size(), 1);
         assert_eq!(lru_cache_1.get("1").unwrap().to_vec(), vec![1 as u8]);

@@ -81,7 +81,6 @@ async fn main() {
         .install()
         .expect("failed to install Prometheus recorder");
     metric::register_counters();
-    // metric::R
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }

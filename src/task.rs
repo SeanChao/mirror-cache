@@ -41,7 +41,7 @@ impl From<CacheData> for TaskResponse {
         match cache_data {
             CacheData::TextData(text) => text.into(),
             CacheData::BytesData(bytes) => TaskResponse::BytesResponse(bytes),
-            CacheData::ByteStream(stream) => TaskResponse::StreamResponse(stream),
+            CacheData::ByteStream(stream) => TaskResponse::StreamResponse(Box::pin(stream)),
         }
     }
 }
@@ -238,14 +238,10 @@ impl TaskManager {
                         if let Some(to_url) = to_url {
                             content = task_clone.rewrite_upstream(content, &to_url);
                         };
-                        c.put(&task_clone.to_key(), content.into());
+                        c.put(&task_clone.to_key(), content.into()).await;
                     } else {
-                        let bytes = res.bytes().await.ok();
-                        if bytes.is_none() {
-                            increment_counter!(metric::CNT_TASKS_BG_FAILURE);
-                            return;
-                        }
-                        c.put(&task_clone.to_key(), bytes.unwrap().into());
+                        let bytestream = res.bytes_stream();
+                        c.put(&task_clone.to_key(), CacheData::ByteStream(Box::new(bytestream.map(move |x| x.map_err(|e| Error::RequestError(e)))))).await;
                     }
                     increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                 }
