@@ -35,6 +35,7 @@ redis_stop:
 	docker stop redis_dev
 
 redis_test:
+	docker stop redis_test || return 0
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
 
 redis_cli:

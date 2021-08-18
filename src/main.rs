@@ -3,6 +3,7 @@ mod error;
 mod metric;
 mod models;
 mod settings;
+mod storage;
 mod task;
 mod util;
 

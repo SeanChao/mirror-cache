@@ -1,5 +1,4 @@
-use crate::cache::CachePolicy;
-use crate::cache::NoCache;
+use crate::cache::{CacheData, CachePolicy, NoCache};
 use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
@@ -34,6 +33,16 @@ pub enum TaskResponse {
 impl From<String> for TaskResponse {
     fn from(s: String) -> TaskResponse {
         TaskResponse::StringResponse(s)
+    }
+}
+
+impl From<CacheData> for TaskResponse {
+    fn from(cache_data: CacheData) -> TaskResponse {
+        match cache_data {
+            CacheData::TextData(text) => text.into(),
+            CacheData::BytesData(bytes) => TaskResponse::BytesResponse(bytes),
+            CacheData::ByteStream(stream) => TaskResponse::StreamResponse(stream),
+        }
     }
 }
 
@@ -88,11 +97,11 @@ impl Task {
         if let Some(data) = cache_result {
             info!("[Request] [HIT] {:?}", &self);
             increment_counter!(metric::COUNTER_CACHE_HIT);
-            return Ok(TaskResponse::BytesResponse(data));
+            return Ok(data.into());
         }
         // cache miss, dispatch async cache task
         increment_counter!(metric::COUNTER_CACHE_MISS);
-        let _ = tm.add_task(self.clone()).await;
+        let _ = tm.spawn_task(self.clone()).await;
         // fetch from upstream
         let remote_url = tm.resolve_task_upstream(&self);
         info!(
@@ -182,8 +191,8 @@ impl TaskManager {
         len
     }
 
-    // add a task into task list
-    async fn add_task(&self, task: Task) {
+    /// Spawn an async task
+    async fn spawn_task(&self, task: Task) {
         increment_counter!(metric::COUNTER_TASKS_BG);
         if self.taskset_contains(&task).await {
             info!("[TASK] ignored existing task: {:?}", task);
@@ -250,7 +259,8 @@ impl TaskManager {
         });
     }
 
-    pub fn get(&self, task_type: &Task, key: &str) -> Option<Bytes> {
+    /// get task result from cache
+    pub fn get(&self, task_type: &Task, key: &str) -> Option<CacheData> {
         match &task_type {
             Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key),
             Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key),
