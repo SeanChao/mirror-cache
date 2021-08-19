@@ -3,9 +3,13 @@ use crate::error::Result;
 
 use bytes::Bytes;
 use futures::StreamExt;
+use futures::{Stream, TryStreamExt};
 use std::fs;
 use std::io::prelude::*;
 use std::path::PathBuf;
+use tokio::fs::OpenOptions;
+use tokio::io::BufReader;
+use tokio_util::codec;
 
 async fn fs_persist(root_dir: &str, name: &str, data: &mut CacheData) {
     let mut path = PathBuf::from(root_dir);
@@ -29,15 +33,24 @@ pub enum Storage {
     FileSystem { root_dir: String },
 }
 
+pub async fn get_file_stream(path: &PathBuf) -> Result<impl Stream<Item = Result<Bytes>>> {
+    let f = OpenOptions::default().read(true).open(path).await?;
+    let f = BufReader::new(f);
+    let stream = codec::FramedRead::new(f, codec::BytesCodec::new())
+        .map_ok(|bytes| bytes.freeze())
+        .map_err(|e| e.into());
+    Ok(stream)
+}
+
 impl Storage {
-    pub fn read(&self, name: &str) -> Result<CacheData> {
+    pub async fn read(&self, name: &str) -> Result<CacheData> {
         match &self {
             Storage::FileSystem { root_dir, .. } => {
                 let mut path = PathBuf::from(root_dir);
                 path.push(name);
-                match fs::read(path) {
-                    Ok(vec) => Ok(Bytes::from(vec).into()),
-                    Err(e) => Err(e.into()),
+                match get_file_stream(&path).await {
+                    Ok(stream) => Ok(CacheData::ByteStream(Box::new(stream))),
+                    Err(e) => Err(e),
                 }
             }
         }

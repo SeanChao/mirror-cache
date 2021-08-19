@@ -9,7 +9,7 @@ run:
 test:
 	docker stop redis_test || return 0
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
-	cargo test
+	cargo test $(ARGS)
 	docker stop redis_test
 
 dev:

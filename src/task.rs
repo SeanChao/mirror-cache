@@ -65,7 +65,7 @@ impl Task {
         let key = self.to_key();
         match &self {
             Task::PypiIndexTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_PYPI_INDEX_CACHE_HIT);
                     cache_result = Some(bytes)
                 } else {
@@ -73,7 +73,7 @@ impl Task {
                 }
             }
             Task::PypiPackagesTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_PYPI_PKGS_CACHE_HIT);
                     cache_result = Some(bytes)
                 } else {
@@ -81,7 +81,7 @@ impl Task {
                 }
             }
             Task::AnacondaTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
                     cache_result = Some(bytes)
                 } else {
@@ -89,7 +89,7 @@ impl Task {
                 }
             }
             Task::Others { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     cache_result = Some(bytes);
                 }
             }
@@ -241,7 +241,13 @@ impl TaskManager {
                         c.put(&task_clone.to_key(), content.into()).await;
                     } else {
                         let bytestream = res.bytes_stream();
-                        c.put(&task_clone.to_key(), CacheData::ByteStream(Box::new(bytestream.map(move |x| x.map_err(|e| Error::RequestError(e)))))).await;
+                        c.put(
+                            &task_clone.to_key(),
+                            CacheData::ByteStream(Box::new(
+                                bytestream.map(move |x| x.map_err(|e| Error::RequestError(e))),
+                            )),
+                        )
+                        .await;
                     }
                     increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                 }
@@ -256,13 +262,13 @@ impl TaskManager {
     }
 
     /// get task result from cache
-    pub fn get(&self, task_type: &Task, key: &str) -> Option<CacheData> {
+    pub async fn get(&self, task_type: &Task, key: &str) -> Option<CacheData> {
         match &task_type {
-            Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key),
-            Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key),
-            Task::AnacondaTask { .. } => self.anaconda_cache.get(key),
+            Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key).await,
+            Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key).await,
+            Task::AnacondaTask { .. } => self.anaconda_cache.get(key).await,
             Task::Others { rule_id, .. } => match self.get_cache_for_cache_rule(*rule_id) {
-                Some(cache) => cache.get(key),
+                Some(cache) => cache.get(key).await,
                 None => {
                     error!("Failed to get cache for rule #{} from cache map", rule_id);
                     None

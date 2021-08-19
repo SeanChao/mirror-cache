@@ -29,20 +29,6 @@ impl CacheData {
             _ => 0, // TODO: length for stream
         }
     }
-
-    fn to_vec(self) -> Vec<u8> {
-        match self {
-            CacheData::TextData(text) => text.into_bytes(),
-            CacheData::BytesData(bytes) => bytes.to_vec(),
-            _ => Vec::new(), // TODO: stream
-        }
-    }
-}
-
-impl Into<Vec<u8>> for CacheData {
-    fn into(self) -> Vec<u8> {
-        self.to_vec()
-    }
 }
 
 impl From<String> for CacheData {
@@ -89,7 +75,7 @@ impl fmt::Debug for CacheData {
 #[async_trait]
 pub trait CachePolicy: Sync + Send {
     async fn put(&self, key: &str, entry: CacheData);
-    fn get(&self, key: &str) -> Option<CacheData>;
+    async fn get(&self, key: &str) -> Option<CacheData>;
 }
 
 pub struct LruRedisCache {
@@ -236,7 +222,7 @@ impl CachePolicy for LruRedisCache {
         trace!("CACHE SET {} -> {:?}", &redis_key, entry);
     }
 
-    fn get(&self, key: &str) -> Option<CacheData> {
+    async fn get(&self, key: &str) -> Option<CacheData> {
         let filename = key;
         let redis_key = &self.to_prefixed_key(key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
@@ -256,14 +242,13 @@ impl CachePolicy for LruRedisCache {
                     info!("Failed to update cache entry atime: {}", e);
                 }
             }
-            let file_content = match self.storage.read(filename) {
-                Ok(data) => data,
-                Err(_) => "".to_string().into(),
+            return match self.storage.read(filename).await {
+                Ok(data) => {
+                    trace!("CACHE GET [HIT] {} -> {:?} ", redis_key, &cache_result);
+                    Some(data)
+                }
+                Err(_) => None,
             };
-            if file_content.len() > 0 {
-                trace!("CACHE GET [HIT] {} -> {:?} ", redis_key, &cache_result);
-                return Some(file_content);
-            }
         };
         trace!("CACHE GET [MISS] {} -> {:?} ", redis_key, &cache_result);
         None
@@ -374,7 +359,7 @@ impl CachePolicy for TtlRedisCache {
         trace!("CACHE SET {} TTL={}", &key, self.ttl);
     }
 
-    fn get(&self, key: &str) -> Option<CacheData> {
+    async fn get(&self, key: &str) -> Option<CacheData> {
         let redis_key = Self::to_redis_key(&self.root_dir, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         match models::get(&mut sync_con, &redis_key) {
@@ -443,7 +428,7 @@ pub struct NoCache {}
 #[async_trait]
 impl CachePolicy for NoCache {
     async fn put(&self, _key: &str, _entry: CacheData) {}
-    fn get(&self, _key: &str) -> Option<CacheData> {
+    async fn get(&self, _key: &str) -> Option<CacheData> {
         None
     }
 }
@@ -451,9 +436,29 @@ impl CachePolicy for NoCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use std::io;
     use std::thread;
     use std::time;
+
+    impl CacheData {
+        pub async fn to_vec(self) -> Vec<u8> {
+            match self {
+                CacheData::TextData(text) => text.into_bytes(),
+                CacheData::BytesData(bytes) => bytes.to_vec(),
+                CacheData::ByteStream(mut stream) => {
+                    let mut v = Vec::new();
+                    while let Some(bytes_result) = stream.next().await {
+                        if !bytes_result.is_ok() {
+                            return Vec::new();
+                        }
+                        v.append(&mut bytes_result.unwrap().to_vec());
+                    }
+                    v
+                }
+            }
+        }
+    }
 
     static TEST_CACHE_DIR: &str = "cache";
 
@@ -490,6 +495,12 @@ mod tests {
     macro_rules! cache_put {
         ($cache: ident, $k: expr, $v: expr) => {
             $cache.put($k, $v).await;
+        };
+    }
+
+    macro_rules! cache_get {
+        ($cache: ident, $k: expr) => {
+            $cache.get($k).await
         };
     }
 
@@ -587,18 +598,18 @@ mod tests {
         // set key4, evict key1
         thread::sleep(time::Duration::from_secs(1));
         cache_put!(lru_cache, key4, vec![4].into());
-        assert!(lru_cache.get(key1).is_none());
+        assert!(cache_get!(lru_cache, key1).is_none());
         // assert
         assert_eq!(lru_cache.get_total_size(), 3);
         // get key2, update atime
         thread::sleep(time::Duration::from_secs(1));
-        assert_eq!(lru_cache.get(key2).unwrap().to_vec(), vec![2]);
+        assert_eq!(cache_get!(lru_cache, key2).unwrap().to_vec().await, vec![2]);
         assert_eq!(lru_cache.get_total_size(), 3);
         // set key1, evict key3
         thread::sleep(time::Duration::from_secs(1));
         cache_put!(lru_cache, key1, vec![11].into());
         assert_eq!(lru_cache.get_total_size(), 3);
-        assert!(lru_cache.get(key3).is_none());
+        assert!(cache_get!(lru_cache, key3).is_none());
         assert_eq!(lru_cache.get_total_size(), 3);
     }
 
@@ -613,7 +624,7 @@ mod tests {
         cache_put!(lru_cache, key, vec![0].into());
         let atime_before: i64 = con.hget(lru_cache.to_prefixed_key(key), "atime").unwrap();
         thread::sleep(time::Duration::from_secs(1));
-        lru_cache.get(key);
+        cache_get!(lru_cache, key);
         let atime_after: i64 = con.hget(lru_cache.to_prefixed_key(key), "atime").unwrap();
         assert_eq!(atime_before < atime_after, true);
     }
@@ -652,9 +663,15 @@ mod tests {
         cache_put!(lru_cache_2, "2", vec![2].into());
         assert_eq!(lru_cache_1.get_total_size(), 1);
         assert_eq!(lru_cache_2.get_total_size(), 1);
-        assert_eq!(lru_cache_1.get("1").unwrap().to_vec(), vec![1 as u8]);
-        assert!(lru_cache_1.get("2").is_none());
-        assert!(lru_cache_2.get("1").is_none());
-        assert_eq!(lru_cache_2.get("2").unwrap().to_vec(), vec![2]);
+        assert_eq!(
+            cache_get!(lru_cache_1, "1").unwrap().to_vec().await,
+            vec![1 as u8]
+        );
+        assert!(cache_get!(lru_cache_1, "2").is_none());
+        assert!(cache_get!(lru_cache_2, "1").is_none());
+        assert_eq!(
+            cache_get!(lru_cache_2, "2").unwrap().to_vec().await,
+            vec![2]
+        );
     }
 }
