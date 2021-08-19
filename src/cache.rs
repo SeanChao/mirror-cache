@@ -11,7 +11,6 @@ use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use std::fmt;
 use std::fs;
-use std::io::prelude::*;
 use std::marker::Send;
 use std::vec::Vec;
 
@@ -261,13 +260,14 @@ impl CachePolicy for LruRedisCache {
  * within the given TTL. The expiration is supported by redis.
  */
 pub struct TtlRedisCache {
-    pub root_dir: String,
+    storage: Storage,
     pub ttl: u64, // cache entry ttl in seconds
     redis_client: redis::Client,
+    id: String,
 }
 
 impl TtlRedisCache {
-    pub fn new(root_dir: &str, ttl: u64, redis_client: redis::Client) -> Self {
+    pub fn new(root_dir: &str, ttl: u64, redis_client: redis::Client, id: &str) -> Self {
         let cloned_client = redis_client.clone();
         let cloned_root_dir = String::from(root_dir);
         std::thread::spawn(move || {
@@ -315,9 +315,12 @@ impl TtlRedisCache {
             }
         });
         Self {
-            root_dir: String::from(root_dir),
+            storage: Storage::FileSystem {
+                root_dir: root_dir.to_string(),
+            },
             ttl,
             redis_client,
+            id: id.to_string(),
         }
     }
 
@@ -335,15 +338,11 @@ impl TtlRedisCache {
 
 #[async_trait]
 impl CachePolicy for TtlRedisCache {
-    async fn put(&self, key: &str, entry: CacheData) {
-        let redis_key = Self::to_redis_key(&self.root_dir, key);
+    async fn put(&self, key: &str, mut entry: CacheData) {
+        let redis_key = Self::to_redis_key(&self.id, key);
+        let filename = key;
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
-        let data_to_write: &[u8] = entry.as_ref();
-        let fs_path = Self::to_fs_path(&self.root_dir, &key);
-        let (parent_dirs, _cached_filename) = util::split_dirs(&fs_path);
-        fs::create_dir_all(parent_dirs).unwrap();
-        let mut f = fs::File::create(fs_path).unwrap();
-        f.write_all(&data_to_write).unwrap();
+        self.storage.persist(filename, &mut entry).await;
         match models::set(&mut sync_con, &redis_key, "") {
             Ok(_) => {}
             Err(e) => {
@@ -360,22 +359,17 @@ impl CachePolicy for TtlRedisCache {
     }
 
     async fn get(&self, key: &str) -> Option<CacheData> {
-        let redis_key = Self::to_redis_key(&self.root_dir, key);
+        let redis_key = Self::to_redis_key(&self.id, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         match models::get(&mut sync_con, &redis_key) {
             Ok(res) => match res {
-                Some(_) => {
-                    let cached_file_path = Self::to_fs_path(&self.root_dir, &key);
-                    let file_content = match fs::read(cached_file_path) {
-                        Ok(data) => data,
-                        Err(_) => vec![],
-                    };
-                    if file_content.len() > 0 {
+                Some(_) => match self.storage.read(key).await {
+                    Ok(data) => {
                         trace!("GET {} [HIT]", key);
-                        return Some(Bytes::from(file_content).into());
+                        Some(data)
                     }
-                    None
-                }
+                    Err(_) => None,
+                },
                 None => None,
             },
             Err(e) => {
@@ -438,6 +432,7 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::io;
+    use std::io::prelude::*;
     use std::thread;
     use std::time;
 

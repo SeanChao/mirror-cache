@@ -100,7 +100,7 @@ fn create_cache_from_rule(
                         p.path.as_ref().unwrap(),
                         p.size.unwrap_or(0),
                         redis_client.unwrap(),
-                        &format!("lru_rule{}", idx),
+                        &format!("lru_rule_{}", idx),
                     )));
                 }
                 PolicyType::Ttl => {
@@ -108,6 +108,7 @@ fn create_cache_from_rule(
                         p.path.as_ref().unwrap(),
                         p.timeout.unwrap_or(0),
                         redis_client.unwrap(),
+                        &format!("ttl_rule_{}", idx),
                     )));
                 }
             };

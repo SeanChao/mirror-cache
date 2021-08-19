@@ -1,5 +1,7 @@
 # MirrorCache
 
+[![Test](https://github.com/SeanChao/mirror-cache/actions/workflows/test.yml/badge.svg)](https://github.com/SeanChao/mirror-cache/actions/workflows/test.yml)
+
 A smart reverse proxy for mirror sites with different cache policies.
 
 ## Getting Started
