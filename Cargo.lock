@@ -914,6 +914,8 @@ dependencies = [
 name = "mirror-cache"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
  "chrono",
  "config",
  "futures",
@@ -930,6 +932,7 @@ dependencies = [
  "serial_test",
  "thiserror",
  "tokio",
+ "tokio-util",
  "warp",
 ]
 

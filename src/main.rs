@@ -3,6 +3,7 @@ mod error;
 mod metric;
 mod models;
 mod settings;
+mod storage;
 mod task;
 mod util;
 
@@ -80,7 +81,6 @@ async fn main() {
         .install()
         .expect("failed to install Prometheus recorder");
     metric::register_counters();
-    // metric::R
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
@@ -191,8 +191,7 @@ mod handlers {
     use super::*;
     use crate::task::Task;
     use std::result::Result;
-
-    use warp::{http::Response, Rejection};
+    use warp::{Rejection, Reply};
 
     pub async fn get_pypi_index(
         path: String,
@@ -203,9 +202,11 @@ mod handlers {
         match tw.resolve(tm).await {
             Ok(data) => {
                 increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_SUCCESS);
-                Ok(Response::builder()
-                    .header("content-type", "text/html")
-                    .body(data))
+                let mut warp_resp: warp::reply::Response = data.into_response();
+                warp_resp
+                    .headers_mut()
+                    .insert("content-type", "text/html".parse().unwrap());
+                Ok(warp_resp)
             }
             Err(_) => {
                 increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_FAILURE);
@@ -225,7 +226,7 @@ mod handlers {
         let fullpath = format!("{}/{}/{}/{}", seg0, seg1, seg2, seg3);
         let t = Task::PypiPackagesTask { pkg_path: fullpath };
         match t.resolve(tm).await {
-            Ok(data) => Ok(Response::builder().body(data)),
+            Ok(data) => Ok(data),
             Err(e) => {
                 error!("{}", e);
                 Err(warp::reject())
@@ -243,7 +244,7 @@ mod handlers {
         let cache_key = format!("{}/{}/{}", channel, arch, filename);
         let t = Task::AnacondaTask { path: cache_key };
         match t.resolve(tm).await {
-            Ok(data) => Ok(Response::builder().body(data)),
+            Ok(data) => Ok(data),
             Err(e) => {
                 error!("{}", e);
                 Err(warp::reject())
@@ -269,7 +270,7 @@ mod handlers {
                         url: String::from(replaced),
                     };
                     if let Ok(data) = t.resolve(tm.clone()).await {
-                        return Ok(Response::builder().body(data));
+                        return Ok(data);
                     }
                 }
             }

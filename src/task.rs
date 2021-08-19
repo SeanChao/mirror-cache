@@ -1,13 +1,16 @@
-use crate::cache;
-use crate::cache::CachePolicy;
-use crate::cache::NoCache;
+use crate::cache::{CacheData, CachePolicy, NoCache};
+use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
 use crate::settings::Settings;
 use crate::util;
+use bytes::Bytes;
+use futures::Stream;
+use futures::StreamExt;
 use metrics::{histogram, increment_counter};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -21,14 +24,48 @@ pub enum Task {
     Others { rule_id: RuleId, url: String },
 }
 
+pub enum TaskResponse {
+    StringResponse(String),
+    BytesResponse(Bytes),
+    StreamResponse(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + Sync>>),
+}
+
+impl From<String> for TaskResponse {
+    fn from(s: String) -> TaskResponse {
+        TaskResponse::StringResponse(s)
+    }
+}
+
+impl From<CacheData> for TaskResponse {
+    fn from(cache_data: CacheData) -> TaskResponse {
+        match cache_data {
+            CacheData::TextData(text) => text.into(),
+            CacheData::BytesData(bytes) => TaskResponse::BytesResponse(bytes),
+            CacheData::ByteStream(stream) => TaskResponse::StreamResponse(Box::pin(stream)),
+        }
+    }
+}
+
+impl warp::Reply for TaskResponse {
+    fn into_response(self) -> warp::reply::Response {
+        match self {
+            TaskResponse::StringResponse(content) => warp::reply::Response::new(content.into()),
+            TaskResponse::BytesResponse(bytes) => warp::reply::Response::new(bytes.into()),
+            TaskResponse::StreamResponse(stream) => {
+                warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream))
+            }
+        }
+    }
+}
+
 impl Task {
-    pub async fn resolve(&self, tm: Arc<TaskManager>) -> Result<cache::BytesArray> {
+    pub async fn resolve(&self, tm: Arc<TaskManager>) -> Result<TaskResponse> {
         // try get from cache
         let mut cache_result = None;
         let key = self.to_key();
         match &self {
             Task::PypiIndexTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_PYPI_INDEX_CACHE_HIT);
                     cache_result = Some(bytes)
                 } else {
@@ -36,7 +73,7 @@ impl Task {
                 }
             }
             Task::PypiPackagesTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_PYPI_PKGS_CACHE_HIT);
                     cache_result = Some(bytes)
                 } else {
@@ -44,7 +81,7 @@ impl Task {
                 }
             }
             Task::AnacondaTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
                     cache_result = Some(bytes)
                 } else {
@@ -52,7 +89,7 @@ impl Task {
                 }
             }
             Task::Others { .. } => {
-                if let Some(bytes) = tm.get(&self, &key) {
+                if let Some(bytes) = tm.get(&self, &key).await {
                     cache_result = Some(bytes);
                 }
             }
@@ -60,15 +97,15 @@ impl Task {
         if let Some(data) = cache_result {
             info!("[Request] [HIT] {:?}", &self);
             increment_counter!(metric::COUNTER_CACHE_HIT);
-            return Ok(data);
+            return Ok(data.into());
         }
         // cache miss, dispatch async cache task
         increment_counter!(metric::COUNTER_CACHE_MISS);
-        let _ = tm.add_task(self.clone()).await;
+        let _ = tm.spawn_task(self.clone()).await;
         // fetch from upstream
         let remote_url = tm.resolve_task_upstream(&self);
         info!(
-            "[Request] [MISS] {:?} fetching from upstream: {}",
+            "[Request] [MISS] {:?}, fetching from upstream: {}",
             &self, &remote_url
         );
         let resp = util::make_request(&remote_url).await;
@@ -77,15 +114,15 @@ impl Task {
                 Task::PypiIndexTask { .. } => {
                     let text_content = res.text().await.unwrap();
                     if let Some(url) = tm.config.url.clone() {
-                        Ok(self
-                            .rewrite_upstream(text_content, &url)
-                            .as_bytes()
-                            .to_vec())
+                        Ok(self.rewrite_upstream(text_content, &url).into())
                     } else {
-                        Ok(text_content.as_bytes().to_vec())
+                        Ok(text_content.into())
                     }
                 }
-                _ => Ok(res.bytes().await.unwrap().to_vec()),
+                _ => Ok(TaskResponse::StreamResponse(Box::pin(
+                    res.bytes_stream()
+                        .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                ))),
             },
             Err(e) => {
                 error!("[Request] {:?} failed to fetch upstream: {}", &self, e);
@@ -154,8 +191,8 @@ impl TaskManager {
         len
     }
 
-    // add a task into task list
-    async fn add_task(&self, task: Task) {
+    /// Spawn an async task
+    async fn spawn_task(&self, task: Task) {
         increment_counter!(metric::COUNTER_TASKS_BG);
         if self.taskset_contains(&task).await {
             info!("[TASK] ignored existing task: {:?}", task);
@@ -201,14 +238,16 @@ impl TaskManager {
                         if let Some(to_url) = to_url {
                             content = task_clone.rewrite_upstream(content, &to_url);
                         };
-                        c.put(&task_clone.to_key(), content.as_bytes().to_vec());
+                        c.put(&task_clone.to_key(), content.into()).await;
                     } else {
-                        let bytes = res.bytes().await.ok();
-                        if bytes.is_none() {
-                            increment_counter!(metric::CNT_TASKS_BG_FAILURE);
-                            return;
-                        }
-                        c.put(&task_clone.to_key(), bytes.unwrap().to_vec());
+                        let bytestream = res.bytes_stream();
+                        c.put(
+                            &task_clone.to_key(),
+                            CacheData::ByteStream(Box::new(
+                                bytestream.map(move |x| x.map_err(|e| Error::RequestError(e))),
+                            )),
+                        )
+                        .await;
                     }
                     increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                 }
@@ -222,13 +261,14 @@ impl TaskManager {
         });
     }
 
-    pub fn get(&self, task_type: &Task, key: &str) -> Option<cache::BytesArray> {
+    /// get task result from cache
+    pub async fn get(&self, task_type: &Task, key: &str) -> Option<CacheData> {
         match &task_type {
-            Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key),
-            Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key),
-            Task::AnacondaTask { .. } => self.anaconda_cache.get(key),
+            Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key).await,
+            Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key).await,
+            Task::AnacondaTask { .. } => self.anaconda_cache.get(key).await,
             Task::Others { rule_id, .. } => match self.get_cache_for_cache_rule(*rule_id) {
-                Some(cache) => cache.get(key),
+                Some(cache) => cache.get(key).await,
                 None => {
                     error!("Failed to get cache for rule #{} from cache map", rule_id);
                     None
