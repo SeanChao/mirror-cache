@@ -10,7 +10,6 @@ use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use std::fmt;
-use std::fs;
 use std::marker::Send;
 use std::vec::Vec;
 
@@ -270,6 +269,12 @@ impl TtlRedisCache {
     pub fn new(root_dir: &str, ttl: u64, redis_client: redis::Client, id: &str) -> Self {
         let cloned_client = redis_client.clone();
         let cloned_root_dir = String::from(root_dir);
+        let storage = Storage::FileSystem {
+            root_dir: root_dir.to_string(),
+        };
+
+        let id_clone = id.to_string();
+        let storage_clone = storage.clone();
         std::thread::spawn(move || {
             debug!("TTL expiration listener is created!");
             loop {
@@ -294,30 +299,28 @@ impl TtlRedisCache {
                                 payload,
                                 cache_key
                             );
-                            let file_path = Self::to_fs_path(&cloned_root_dir, &cache_key);
-                            match fs::remove_file(&file_path) {
+                            let file = Self::from_redis_key(&id_clone, &cache_key);
+                            match storage_clone.remove(&file) {
                                 Ok(_) => {
                                     increment_counter!(metric::CNT_RM_FILES);
-                                    info!("TTL cache removed {}", file_path);
+                                    info!("TTL cache removed {}", &file);
                                 }
                                 Err(e) => {
-                                    if e.kind() == std::io::ErrorKind::NotFound {
-                                        // warn!("Failed to remove {}: {}", &file_path, e);
-                                    }
+                                    warn!("Failed to remove {}: {}", &file, e);
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to get_message: {}", e);
+                            error!("Failed to get_message, retrying every 3s: {}", e);
+                            util::sleep_ms(3000);
+                            break;
                         }
                     }
                 }
             }
         });
         Self {
-            storage: Storage::FileSystem {
-                root_dir: root_dir.to_string(),
-            },
+            storage,
             ttl,
             redis_client,
             id: id.to_string(),
@@ -329,10 +332,6 @@ impl TtlRedisCache {
     }
     pub fn from_redis_key(root_dir: &str, key: &str) -> String {
         String::from(&key[16 + root_dir.len() + 1..])
-    }
-
-    pub fn to_fs_path(root_dir: &str, cache_key: &str) -> String {
-        format!("{}/{}", root_dir, cache_key)
     }
 }
 
@@ -431,6 +430,7 @@ impl CachePolicy for NoCache {
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use std::fs;
     use std::io;
     use std::io::prelude::*;
     use std::thread;
