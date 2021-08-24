@@ -20,7 +20,8 @@ pub type SharedTaskManager = Arc<TaskManager>;
 pub enum Task {
     PypiIndexTask { pkg_name: String },
     PypiPackagesTask { pkg_path: String },
-    AnacondaTask { path: String },
+    AnacondaIndexTask { path: String },
+    AnacondaPackagesTask { path: String },
     Others { rule_id: RuleId, url: String },
 }
 
@@ -80,7 +81,15 @@ impl Task {
                     increment_counter!(metric::CNT_PYPI_PKGS_CACHE_MISS);
                 }
             }
-            Task::AnacondaTask { .. } => {
+            Task::AnacondaIndexTask { .. } => {
+                if let Some(bytes) = tm.get(&self, &key).await {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
+                    cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_MISS);
+                }
+            }
+            Task::AnacondaPackagesTask { .. } => {
                 if let Some(bytes) = tm.get(&self, &key).await {
                     increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
                     cache_result = Some(bytes)
@@ -143,7 +152,8 @@ impl Task {
         match &self {
             Task::PypiIndexTask { pkg_name, .. } => format!("pypi_index_{}", pkg_name),
             Task::PypiPackagesTask { pkg_path, .. } => String::from(pkg_path),
-            Task::AnacondaTask { path, .. } => format!("anaconda_{}", path),
+            Task::AnacondaIndexTask { path, .. } => format!("anaconda_index_{}", path),
+            Task::AnacondaPackagesTask { path, .. } => format!("anaconda_{}", path),
             Task::Others { url, .. } => url
                 .replace("http://", "http/")
                 .replace("https://", "https/"),
@@ -157,7 +167,8 @@ pub struct TaskManager {
     pub config: Settings,
     pub pypi_index_cache: Arc<dyn CachePolicy>,
     pub pypi_pkg_cache: Arc<dyn CachePolicy>,
-    pub anaconda_cache: Arc<dyn CachePolicy>,
+    pub anaconda_index_cache: Arc<dyn CachePolicy>,
+    pub anaconda_pkg_cache: Arc<dyn CachePolicy>,
     pub cache_map: HashMap<RuleId, Arc<dyn CachePolicy>>,
     task_set: Arc<RwLock<HashSet<Task>>>,
 }
@@ -168,7 +179,8 @@ impl TaskManager {
             config,
             pypi_index_cache: Arc::new(NoCache {}),
             pypi_pkg_cache: Arc::new(NoCache {}),
-            anaconda_cache: Arc::new(NoCache {}),
+            anaconda_index_cache: Arc::new(NoCache {}),
+            anaconda_pkg_cache: Arc::new(NoCache {}),
             cache_map: HashMap::new(),
             task_set: Arc::new(RwLock::new(HashSet::new())),
         }
@@ -214,8 +226,11 @@ impl TaskManager {
             Task::PypiPackagesTask { .. } => {
                 c = self.pypi_pkg_cache.clone();
             }
-            Task::AnacondaTask { .. } => {
-                c = self.anaconda_cache.clone();
+            Task::AnacondaIndexTask { .. } => {
+                c = self.anaconda_index_cache.clone();
+            }
+            Task::AnacondaPackagesTask { .. } => {
+                c = self.anaconda_pkg_cache.clone();
             }
             Task::Others { rule_id, .. } => {
                 c = self.get_cache_for_cache_rule(*rule_id).unwrap();
@@ -267,7 +282,8 @@ impl TaskManager {
         match &task_type {
             Task::PypiIndexTask { .. } => self.pypi_index_cache.get(key).await,
             Task::PypiPackagesTask { .. } => self.pypi_pkg_cache.get(key).await,
-            Task::AnacondaTask { .. } => self.anaconda_cache.get(key).await,
+            Task::AnacondaIndexTask { .. } => self.anaconda_index_cache.get(key).await,
+            Task::AnacondaPackagesTask { .. } => self.anaconda_pkg_cache.get(key).await,
             Task::Others { rule_id, .. } => match self.get_cache_for_cache_rule(*rule_id) {
                 Some(cache) => cache.get(key).await,
                 None => {
@@ -287,8 +303,14 @@ impl TaskManager {
                 "{}/{}",
                 &self.config.builtin.pypi_packages.upstream, pkg_path
             ),
-            Task::AnacondaTask { path } => {
-                format!("{}/{}", &self.config.builtin.anaconda.upstream, path)
+            Task::AnacondaIndexTask { path } => {
+                format!("{}/{}", &self.config.builtin.anaconda_index.upstream, path)
+            }
+            Task::AnacondaPackagesTask { path } => {
+                format!(
+                    "{}/{}",
+                    &self.config.builtin.anaconda_packages.upstream, path
+                )
             }
             Task::Others { url, .. } => url.clone(),
         }
