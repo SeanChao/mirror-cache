@@ -13,8 +13,11 @@ builtin:
   pypi_packages:
     policy: "policy_lru"
     upstream: "https://files.pythonhosted.org/packages"
-  anaconda:
+  anaconda_index:
     policy: "policy_ttl_60"
+    upstream: "https://repo.anaconda.com/pkgs"
+  anaconda_packages:
+    policy: "policy_lru_anaconda"
     upstream: "https://repo.anaconda.com/pkgs"
 
 rules:
@@ -29,6 +32,10 @@ policies:
     path: "cache/ttl"
     timeout: 60
   - name: policy_lru
+    type: LRU
+    size: 1073741824
+    path: "cache/lru"
+  - name: policy_lru_anaconda
     type: LRU
     size: 1073741824
     path: "cache/lru"

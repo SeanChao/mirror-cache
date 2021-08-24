@@ -46,7 +46,8 @@ async fn main() {
     let policies = app_settings.policies.clone();
     let pypi_index_rule = app_settings.builtin.clone().pypi_index;
     let pypi_pkg_rule = app_settings.builtin.clone().pypi_packages;
-    let anaconda_rule = app_settings.builtin.clone().anaconda;
+    let anaconda_index_rule = app_settings.builtin.clone().anaconda_index;
+    let anaconda_pkg_rule = app_settings.builtin.clone().anaconda_packages;
 
     let mut tm = TaskManager::new(app_settings.clone());
 
@@ -55,12 +56,16 @@ async fn main() {
         create_cache_from_rule(&pypi_index_rule, &policies, Some(redis_client.clone())).unwrap();
     let pypi_pkg_cache =
         create_cache_from_rule(&pypi_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
-    let anaconda_cache =
-        create_cache_from_rule(&anaconda_rule, &policies, Some(redis_client.clone())).unwrap();
+    let anaconda_index_cache =
+        create_cache_from_rule(&anaconda_index_rule, &policies, Some(redis_client.clone()))
+            .unwrap();
+    let anaconda_pkg_cache =
+        create_cache_from_rule(&anaconda_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
 
     tm.pypi_index_cache = pypi_index_cache;
     tm.pypi_pkg_cache = pypi_pkg_cache;
-    tm.anaconda_cache = anaconda_cache;
+    tm.anaconda_index_cache = anaconda_index_cache;
+    tm.anaconda_pkg_cache = anaconda_pkg_cache;
 
     for (idx, rule) in app_settings.rules.iter().enumerate() {
         debug!("creating rule #{}: {:?}", idx, rule);
@@ -244,7 +249,12 @@ mod handlers {
     ) -> Result<impl warp::Reply, Rejection> {
         increment_counter!(metric::COUNTER_ANACONDA_REQ);
         let cache_key = format!("{}/{}/{}", channel, arch, filename);
-        let t = Task::AnacondaTask { path: cache_key };
+        let t;
+        if filename.ends_with(".json") {
+            t = Task::AnacondaIndexTask { path: cache_key };
+        } else {
+            t = Task::AnacondaPackagesTask { path: cache_key };
+        }
         match t.resolve(tm).await {
             Ok(data) => Ok(data),
             Err(e) => {

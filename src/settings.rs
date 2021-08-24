@@ -40,7 +40,8 @@ pub struct Policy {
 pub struct BuiltinRules {
     pub pypi_index: Rule,
     pub pypi_packages: Rule,
-    pub anaconda: Rule,
+    pub anaconda_index: Rule,
+    pub anaconda_packages: Rule,
 }
 
 #[derive(Debug, Deserialize, Copy, Clone)]
