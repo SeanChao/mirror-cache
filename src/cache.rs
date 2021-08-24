@@ -268,7 +268,6 @@ pub struct TtlRedisCache {
 impl TtlRedisCache {
     pub fn new(root_dir: &str, ttl: u64, redis_client: redis::Client, id: &str) -> Self {
         let cloned_client = redis_client.clone();
-        let cloned_root_dir = String::from(root_dir);
         let storage = Storage::FileSystem {
             root_dir: root_dir.to_string(),
         };
@@ -280,8 +279,8 @@ impl TtlRedisCache {
             loop {
                 let mut con = cloned_client.get_connection().unwrap();
                 let mut pubsub = con.as_pubsub();
-                // TODO: subscribe only current cache key pattern
-                match pubsub.psubscribe("__keyevent*__:expired") {
+                trace!("subscribe to cache key pattern: {}", &id_clone);
+                match pubsub.psubscribe(format!("__keyspace*__:{}*", &id_clone)) {
                     Ok(_) => {}
                     Err(e) => {
                         error!("Failed to psubscribe: {}", e);
@@ -291,15 +290,15 @@ impl TtlRedisCache {
                 loop {
                     match pubsub.get_message() {
                         Ok(msg) => {
-                            let payload: String = msg.get_payload().unwrap();
-                            let cache_key = Self::from_redis_key(&cloned_root_dir, &payload);
+                            let channel: String = msg.get_channel().unwrap();
+                            let redis_key = &channel[channel.find(":").unwrap() + 1..];
+                            let file = Self::from_redis_key(&id_clone, &redis_key);
                             trace!(
-                                "channel '{}': {}, pkg: {}",
+                                "channel '{}': {}, file: {}",
                                 msg.get_channel_name(),
-                                payload,
-                                cache_key
+                                channel,
+                                file,
                             );
-                            let file = Self::from_redis_key(&id_clone, &cache_key);
                             match storage_clone.remove(&file) {
                                 Ok(_) => {
                                     increment_counter!(metric::CNT_RM_FILES);
@@ -327,11 +326,11 @@ impl TtlRedisCache {
         }
     }
 
-    pub fn to_redis_key(root_dir: &str, cache_key: &str) -> String {
-        format!("ttl_redis_cache/{}/{}", root_dir, cache_key)
+    pub fn to_redis_key(id: &str, cache_key: &str) -> String {
+        format!("{}/{}", id, cache_key)
     }
-    pub fn from_redis_key(root_dir: &str, key: &str) -> String {
-        String::from(&key[16 + root_dir.len() + 1..])
+    pub fn from_redis_key(id: &str, key: &str) -> String {
+        String::from(&key[id.len() + 1..])
     }
 }
 

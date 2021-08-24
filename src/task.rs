@@ -138,6 +138,7 @@ impl Task {
         }
     }
 
+    /// create a unique key for the current task
     pub fn to_key(&self) -> String {
         match &self {
             Task::PypiIndexTask { pkg_name, .. } => format!("pypi_index_{}", pkg_name),

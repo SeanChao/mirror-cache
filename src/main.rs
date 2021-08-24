@@ -36,6 +36,7 @@ async fn main() {
     let mut log_builder = pretty_env_logger::formatted_builder();
     log_builder
         .filter_module("hyper::proto", log::LevelFilter::Error) // hide excessive logs
+        .filter_module("tracing::span", log::LevelFilter::Error)
         .filter_level(app_settings.get_log_level())
         .init();
 
