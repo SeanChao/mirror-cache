@@ -119,20 +119,27 @@ impl Task {
         );
         let resp = util::make_request(&remote_url).await;
         match resp {
-            Ok(res) => match &self {
-                Task::PypiIndexTask { .. } => {
-                    let text_content = res.text().await.unwrap();
-                    if let Some(url) = tm.config.url.clone() {
-                        Ok(self.rewrite_upstream(text_content, &url).into())
-                    } else {
-                        Ok(text_content.into())
-                    }
+            Ok(res) => {
+                if !res.status().is_success() {
+                    return Err(Error::UpstreamError(
+                        res.status().canonical_reason().unwrap_or("unknown").into(),
+                    ));
                 }
-                _ => Ok(TaskResponse::StreamResponse(Box::pin(
-                    res.bytes_stream()
-                        .map(move |x| x.map_err(|e| Error::RequestError(e))),
-                ))),
-            },
+                match &self {
+                    Task::PypiIndexTask { .. } => {
+                        let text_content = res.text().await.unwrap();
+                        if let Some(url) = tm.config.url.clone() {
+                            Ok(self.rewrite_upstream(text_content, &url).into())
+                        } else {
+                            Ok(text_content.into())
+                        }
+                    }
+                    _ => Ok(TaskResponse::StreamResponse(Box::pin(
+                        res.bytes_stream()
+                            .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                    ))),
+                }
+            }
             Err(e) => {
                 error!("[Request] {:?} failed to fetch upstream: {}", &self, e);
                 Err(e)
@@ -244,32 +251,44 @@ impl TaskManager {
             let resp = util::make_request(&upstream_url).await;
             match resp {
                 Ok(res) => {
-                    if rewrite {
-                        let content = res.text().await.ok();
-                        if content.is_none() {
-                            increment_counter!(metric::CNT_TASKS_BG_FAILURE);
-                            return;
+                    if res.status().is_success() {
+                        if rewrite {
+                            let content = res.text().await.ok();
+                            if content.is_none() {
+                                increment_counter!(metric::CNT_TASKS_BG_FAILURE);
+                                return;
+                            }
+                            let mut content = content.unwrap();
+                            if let Some(to_url) = to_url {
+                                content = task_clone.rewrite_upstream(content, &to_url);
+                            };
+                            c.put(&task_clone.to_key(), content.into()).await;
+                        } else {
+                            let bytestream = res.bytes_stream();
+                            c.put(
+                                &task_clone.to_key(),
+                                CacheData::ByteStream(Box::new(
+                                    bytestream.map(move |x| x.map_err(|e| Error::RequestError(e))),
+                                )),
+                            )
+                            .await;
                         }
-                        let mut content = content.unwrap();
-                        if let Some(to_url) = to_url {
-                            content = task_clone.rewrite_upstream(content, &to_url);
-                        };
-                        c.put(&task_clone.to_key(), content.into()).await;
+                        increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                     } else {
-                        let bytestream = res.bytes_stream();
-                        c.put(
-                            &task_clone.to_key(),
-                            CacheData::ByteStream(Box::new(
-                                bytestream.map(move |x| x.map_err(|e| Error::RequestError(e))),
-                            )),
-                        )
-                        .await;
+                        warn!(
+                            "[TASK] ❌ failed to fetch upstream: {}, Task {:?}",
+                            res.status().canonical_reason().unwrap_or("unknown"),
+                            &task_clone
+                        );
+                        increment_counter!(metric::CNT_TASKS_BG_FAILURE);
                     }
-                    increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                 }
                 Err(e) => {
                     increment_counter!(metric::CNT_TASKS_BG_FAILURE);
-                    error!("[TASK] ❌ failed to fetch upstream: {}", e);
+                    error!(
+                        "[TASK] ❌ failed to fetch upstream: {}, Task {:?}",
+                        e, &task_clone
+                    );
                 }
             };
             Self::taskset_remove(task_list_ptr.clone(), &task_clone).await;
