@@ -15,7 +15,7 @@ builtin:
     upstream: "https://files.pythonhosted.org"
   anaconda:
     policy: "policy_ttl_3"
-    upstream: "https://conda-static.anaconda.org"
+    upstream: "https://repo.anaconda.com/pkgs"
 
 rules: []
 

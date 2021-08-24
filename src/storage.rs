@@ -29,6 +29,7 @@ async fn fs_persist(root_dir: &str, name: &str, data: &mut CacheData) {
 
 /// Storage is an abstraction over a persistent storage.
 /// - FileSystem: local filesystem
+#[derive(Clone)]
 pub enum Storage {
     FileSystem { root_dir: String },
 }

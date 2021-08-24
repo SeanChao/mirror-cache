@@ -10,7 +10,6 @@ use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use std::fmt;
-use std::fs;
 use std::marker::Send;
 use std::vec::Vec;
 
@@ -269,14 +268,19 @@ pub struct TtlRedisCache {
 impl TtlRedisCache {
     pub fn new(root_dir: &str, ttl: u64, redis_client: redis::Client, id: &str) -> Self {
         let cloned_client = redis_client.clone();
-        let cloned_root_dir = String::from(root_dir);
+        let storage = Storage::FileSystem {
+            root_dir: root_dir.to_string(),
+        };
+
+        let id_clone = id.to_string();
+        let storage_clone = storage.clone();
         std::thread::spawn(move || {
             debug!("TTL expiration listener is created!");
             loop {
                 let mut con = cloned_client.get_connection().unwrap();
                 let mut pubsub = con.as_pubsub();
-                // TODO: subscribe only current cache key pattern
-                match pubsub.psubscribe("__keyevent*__:expired") {
+                trace!("subscribe to cache key pattern: {}", &id_clone);
+                match pubsub.psubscribe(format!("__keyspace*__:{}*", &id_clone)) {
                     Ok(_) => {}
                     Err(e) => {
                         error!("Failed to psubscribe: {}", e);
@@ -286,53 +290,47 @@ impl TtlRedisCache {
                 loop {
                     match pubsub.get_message() {
                         Ok(msg) => {
-                            let payload: String = msg.get_payload().unwrap();
-                            let cache_key = Self::from_redis_key(&cloned_root_dir, &payload);
+                            let channel: String = msg.get_channel().unwrap();
+                            let redis_key = &channel[channel.find(":").unwrap() + 1..];
+                            let file = Self::from_redis_key(&id_clone, &redis_key);
                             trace!(
-                                "channel '{}': {}, pkg: {}",
+                                "channel '{}': {}, file: {}",
                                 msg.get_channel_name(),
-                                payload,
-                                cache_key
+                                channel,
+                                file,
                             );
-                            let file_path = Self::to_fs_path(&cloned_root_dir, &cache_key);
-                            match fs::remove_file(&file_path) {
+                            match storage_clone.remove(&file) {
                                 Ok(_) => {
                                     increment_counter!(metric::CNT_RM_FILES);
-                                    info!("TTL cache removed {}", file_path);
+                                    info!("TTL cache removed {}", &file);
                                 }
                                 Err(e) => {
-                                    if e.kind() == std::io::ErrorKind::NotFound {
-                                        // warn!("Failed to remove {}: {}", &file_path, e);
-                                    }
+                                    warn!("Failed to remove {}: {}", &file, e);
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to get_message: {}", e);
+                            error!("Failed to get_message, retrying every 3s: {}", e);
+                            util::sleep_ms(3000);
+                            break;
                         }
                     }
                 }
             }
         });
         Self {
-            storage: Storage::FileSystem {
-                root_dir: root_dir.to_string(),
-            },
+            storage,
             ttl,
             redis_client,
             id: id.to_string(),
         }
     }
 
-    pub fn to_redis_key(root_dir: &str, cache_key: &str) -> String {
-        format!("ttl_redis_cache/{}/{}", root_dir, cache_key)
+    pub fn to_redis_key(id: &str, cache_key: &str) -> String {
+        format!("{}/{}", id, cache_key)
     }
-    pub fn from_redis_key(root_dir: &str, key: &str) -> String {
-        String::from(&key[16 + root_dir.len() + 1..])
-    }
-
-    pub fn to_fs_path(root_dir: &str, cache_key: &str) -> String {
-        format!("{}/{}", root_dir, cache_key)
+    pub fn from_redis_key(id: &str, key: &str) -> String {
+        String::from(&key[id.len() + 1..])
     }
 }
 
@@ -431,6 +429,7 @@ impl CachePolicy for NoCache {
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use std::fs;
     use std::io;
     use std::io::prelude::*;
     use std::thread;
