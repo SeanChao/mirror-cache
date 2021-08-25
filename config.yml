@@ -24,7 +24,6 @@ rules:
   - path: "ubuntu/dists/(.*)/(.*)"
     policy: "policy_ubuntu"
     upstream: "http://archive.ubuntu.com/ubuntu/dists/$1/$2"
-    id: "ubuntu"
 
 policies:
   - name: policy_ttl_60
