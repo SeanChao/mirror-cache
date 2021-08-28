@@ -1,6 +1,10 @@
-# MirrorCache
+<h1 align="center">MirrorCache</h1>
 
-[![Test](https://github.com/SeanChao/mirror-cache/actions/workflows/test.yml/badge.svg)](https://github.com/SeanChao/mirror-cache/actions/workflows/test.yml)
+<div align="center">
+  <a href="https://github.com/SeanChao/mirror-cache/actions/workflows/test.yml">
+    <img src="https://github.com/SeanChao/mirror-cache/actions/workflows/test.yml/badge.svg" alt="GitHub Action CI status"></img>
+  </a>
+</div>
 
 A smart reverse proxy supporting multiple cache policies and customized rules, for mirror sites and also personal users!
 

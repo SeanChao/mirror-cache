@@ -14,8 +14,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub type SharedTaskManager = Arc<TaskManager>;
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Task {
     PypiIndexTask { pkg_name: String },
@@ -60,93 +58,6 @@ impl warp::Reply for TaskResponse {
 }
 
 impl Task {
-    pub async fn resolve(&self, tm: Arc<TaskManager>) -> Result<TaskResponse> {
-        // try get from cache
-        let mut cache_result = None;
-        let key = self.to_key();
-        match &self {
-            Task::PypiIndexTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key).await {
-                    increment_counter!(metric::CNT_PYPI_INDEX_CACHE_HIT);
-                    cache_result = Some(bytes)
-                } else {
-                    increment_counter!(metric::CNT_PYPI_INDEX_CACHE_MISS);
-                }
-            }
-            Task::PypiPackagesTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key).await {
-                    increment_counter!(metric::CNT_PYPI_PKGS_CACHE_HIT);
-                    cache_result = Some(bytes)
-                } else {
-                    increment_counter!(metric::CNT_PYPI_PKGS_CACHE_MISS);
-                }
-            }
-            Task::AnacondaIndexTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key).await {
-                    increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
-                    cache_result = Some(bytes)
-                } else {
-                    increment_counter!(metric::CNT_ANACONDA_CACHE_MISS);
-                }
-            }
-            Task::AnacondaPackagesTask { .. } => {
-                if let Some(bytes) = tm.get(&self, &key).await {
-                    increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
-                    cache_result = Some(bytes)
-                } else {
-                    increment_counter!(metric::CNT_ANACONDA_CACHE_MISS);
-                }
-            }
-            Task::Others { .. } => {
-                if let Some(bytes) = tm.get(&self, &key).await {
-                    cache_result = Some(bytes);
-                }
-            }
-        };
-        if let Some(data) = cache_result {
-            info!("[Request] [HIT] {:?}", &self);
-            increment_counter!(metric::COUNTER_CACHE_HIT);
-            return Ok(data.into());
-        }
-        // cache miss, dispatch async cache task
-        increment_counter!(metric::COUNTER_CACHE_MISS);
-        let _ = tm.spawn_task(self.clone()).await;
-        // fetch from upstream
-        let remote_url = tm.resolve_task_upstream(&self);
-        info!(
-            "[Request] [MISS] {:?}, fetching from upstream: {}",
-            &self, &remote_url
-        );
-        let resp = util::make_request(&remote_url).await;
-        match resp {
-            Ok(res) => {
-                if !res.status().is_success() {
-                    return Err(Error::UpstreamError(
-                        res.status().canonical_reason().unwrap_or("unknown").into(),
-                    ));
-                }
-                match &self {
-                    Task::PypiIndexTask { .. } => {
-                        let text_content = res.text().await.unwrap();
-                        if let Some(url) = tm.config.url.clone() {
-                            Ok(self.rewrite_upstream(text_content, &url).into())
-                        } else {
-                            Ok(text_content.into())
-                        }
-                    }
-                    _ => Ok(TaskResponse::StreamResponse(Box::pin(
-                        res.bytes_stream()
-                            .map(move |x| x.map_err(|e| Error::RequestError(e))),
-                    ))),
-                }
-            }
-            Err(e) => {
-                error!("[Request] {:?} failed to fetch upstream: {}", &self, e);
-                Err(e)
-            }
-        }
-    }
-
     pub fn rewrite_upstream(&self, input: String, to: &str) -> String {
         match &self {
             Task::PypiIndexTask { .. } => util::pypi_index_rewrite(&input, to),
@@ -170,6 +81,7 @@ impl Task {
 
 pub type RuleId = usize;
 
+#[derive(Clone)]
 pub struct TaskManager {
     pub config: Settings,
     pub pypi_index_cache: Arc<dyn CachePolicy>,
@@ -179,6 +91,8 @@ pub struct TaskManager {
     pub cache_map: HashMap<RuleId, Arc<dyn CachePolicy>>,
     task_set: Arc<RwLock<HashSet<Task>>>,
 }
+
+use crate::create_cache_from_rule;
 
 impl TaskManager {
     pub fn new(config: Settings) -> Self {
@@ -191,6 +105,135 @@ impl TaskManager {
             cache_map: HashMap::new(),
             task_set: Arc::new(RwLock::new(HashSet::new())),
         }
+    }
+
+    pub async fn resolve_task(&self, task: &Task) -> Result<TaskResponse> {
+        // try get from cache
+        let mut cache_result = None;
+        let key = task.to_key();
+        match &task {
+            Task::PypiIndexTask { .. } => {
+                if let Some(bytes) = self.get(&task, &key).await {
+                    increment_counter!(metric::CNT_PYPI_INDEX_CACHE_HIT);
+                    cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_PYPI_INDEX_CACHE_MISS);
+                }
+            }
+            Task::PypiPackagesTask { .. } => {
+                if let Some(bytes) = self.get(&task, &key).await {
+                    increment_counter!(metric::CNT_PYPI_PKGS_CACHE_HIT);
+                    cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_PYPI_PKGS_CACHE_MISS);
+                }
+            }
+            Task::AnacondaIndexTask { .. } => {
+                if let Some(bytes) = self.get(&task, &key).await {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
+                    cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_MISS);
+                }
+            }
+            Task::AnacondaPackagesTask { .. } => {
+                if let Some(bytes) = self.get(&task, &key).await {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_HIT);
+                    cache_result = Some(bytes)
+                } else {
+                    increment_counter!(metric::CNT_ANACONDA_CACHE_MISS);
+                }
+            }
+            Task::Others { .. } => {
+                if let Some(bytes) = self.get(&task, &key).await {
+                    cache_result = Some(bytes);
+                }
+            }
+        };
+        if let Some(data) = cache_result {
+            info!("[Request] [HIT] {:?}", &task);
+            increment_counter!(metric::COUNTER_CACHE_HIT);
+            return Ok(data.into());
+        }
+        // cache miss, dispatch async cache task
+        increment_counter!(metric::COUNTER_CACHE_MISS);
+        let _ = self.spawn_task(task.clone()).await;
+        // fetch from upstream
+        let remote_url = self.resolve_task_upstream(&task);
+        info!(
+            "[Request] [MISS] {:?}, fetching from upstream: {}",
+            &task, &remote_url
+        );
+        let resp = util::make_request(&remote_url).await;
+        match resp {
+            Ok(res) => {
+                if !res.status().is_success() {
+                    return Err(Error::UpstreamError(
+                        res.status().canonical_reason().unwrap_or("unknown").into(),
+                    ));
+                }
+                match &task {
+                    Task::PypiIndexTask { .. } => {
+                        let text_content = res.text().await.unwrap();
+                        if let Some(url) = self.config.url.clone() {
+                            Ok(task.rewrite_upstream(text_content, &url).into())
+                        } else {
+                            Ok(text_content.into())
+                        }
+                    }
+                    _ => Ok(TaskResponse::StreamResponse(Box::pin(
+                        res.bytes_stream()
+                            .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                    ))),
+                }
+            }
+            Err(e) => {
+                error!("[Request] {:?} failed to fetch upstream: {}", &task, e);
+                Err(e)
+            }
+        }
+    }
+
+    pub fn refresh_config(&mut self, settings: &Settings) {
+        let app_settings = settings;
+        let redis_url = app_settings.get_redis_url();
+        let policies = app_settings.policies.clone();
+        let pypi_index_rule = app_settings.builtin.clone().pypi_index;
+        let pypi_pkg_rule = app_settings.builtin.clone().pypi_packages;
+        let anaconda_index_rule = app_settings.builtin.clone().anaconda_index;
+        let anaconda_pkg_rule = app_settings.builtin.clone().anaconda_packages;
+
+        let mut tm = self;
+        tm.config = app_settings.clone();
+        let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
+        let pypi_index_cache =
+            create_cache_from_rule(&pypi_index_rule, &policies, Some(redis_client.clone()))
+                .unwrap();
+        let pypi_pkg_cache =
+            create_cache_from_rule(&pypi_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
+        let anaconda_index_cache =
+            create_cache_from_rule(&anaconda_index_rule, &policies, Some(redis_client.clone()))
+                .unwrap();
+        let anaconda_pkg_cache =
+            create_cache_from_rule(&anaconda_pkg_rule, &policies, Some(redis_client.clone()))
+                .unwrap();
+
+        // let old_arc = tm.pypi_index_cache.clone();
+        // println!("old {} {}", Arc::weak_count(&old_arc), Arc::strong_count(&old_arc));
+        // println!("new {} {}", Arc::weak_count(&old_arc), Arc::strong_count(&old_arc));
+        tm.pypi_index_cache = pypi_index_cache;
+        tm.pypi_pkg_cache = pypi_pkg_cache;
+        tm.anaconda_index_cache = anaconda_index_cache;
+        tm.anaconda_pkg_cache = anaconda_pkg_cache;
+
+        tm.cache_map.clear();
+        for (idx, rule) in app_settings.rules.iter().enumerate() {
+            debug!("creating rule #{}: {:?}", idx, rule);
+            let cache =
+                create_cache_from_rule(rule, &policies, Some(redis_client.clone())).unwrap();
+            tm.add_cache(idx, cache);
+        }
+        info!("config reloaded {:?}", &settings);
     }
 
     async fn taskset_contains(&self, t: &Task) -> bool {
