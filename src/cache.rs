@@ -11,12 +11,17 @@ use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use std::fmt;
 use std::marker::Send;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::vec::Vec;
 
 pub enum CacheData {
     TextData(String),
     BytesData(Bytes),
-    ByteStream(Box<dyn Stream<Item = Result<Bytes>> + Send + Sync + Unpin>),
+    ByteStream(
+        Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>,
+        Option<usize>,
+    ), // stream and size
 }
 
 impl CacheData {
@@ -24,7 +29,7 @@ impl CacheData {
         match &self {
             CacheData::TextData(text) => text.len(),
             CacheData::BytesData(bytes) => bytes.len(),
-            _ => 0, // TODO: length for stream
+            CacheData::ByteStream(_, size) => size.unwrap(),
         }
     }
 }
@@ -64,12 +69,22 @@ impl fmt::Debug for CacheData {
         match &self {
             CacheData::TextData(s) => f.field("TextData", s),
             CacheData::BytesData(b) => f.field("Bytes", b),
-            CacheData::ByteStream(_) => f.field("ByteStream", &"...".to_string()),
+            CacheData::ByteStream(_, size) => f.field(
+                "ByteStream",
+                &format!(
+                    "(stream of size {})",
+                    size.map(|x| format!("{}", x))
+                        .unwrap_or("unknown".to_string())
+                ),
+            ),
         };
         f.finish()
     }
 }
 
+/// CachePolicy is a trait that defines the shared behaviors of all cache policies.
+/// - `put`: put a key-value pair into the cache
+/// - `get`: get a value from the cache
 #[async_trait]
 pub trait CachePolicy: Sync + Send {
     async fn put(&self, key: &str, entry: CacheData);
@@ -263,6 +278,8 @@ pub struct TtlRedisCache {
     pub ttl: u64, // cache entry ttl in seconds
     redis_client: redis::Client,
     id: String,
+    pub pending_close: Arc<AtomicBool>,
+    pub expiration_thread_handler: Option<std::thread::JoinHandle<()>>,
 }
 
 impl TtlRedisCache {
@@ -271,49 +288,76 @@ impl TtlRedisCache {
         let storage = Storage::FileSystem {
             root_dir: root_dir.to_string(),
         };
+        let pending_close = Arc::new(AtomicBool::new(false));
 
         let id_clone = id.to_string();
         let storage_clone = storage.clone();
-        std::thread::spawn(move || {
+        let pending_close_clone = pending_close.clone();
+        let expiration_thread_handler = std::thread::spawn(move || {
             debug!("TTL expiration listener is created!");
             loop {
-                let mut con = cloned_client.get_connection().unwrap();
-                let mut pubsub = con.as_pubsub();
-                trace!("subscribe to cache key pattern: {}", &id_clone);
-                match pubsub.psubscribe(format!("__keyspace*__:{}*", &id_clone)) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("Failed to psubscribe: {}", e);
-                        continue;
-                    }
+                if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
                 }
-                loop {
-                    match pubsub.get_message() {
-                        Ok(msg) => {
-                            let channel: String = msg.get_channel().unwrap();
-                            let redis_key = &channel[channel.find(":").unwrap() + 1..];
-                            let file = Self::from_redis_key(&id_clone, &redis_key);
-                            trace!(
-                                "channel '{}': {}, file: {}",
-                                msg.get_channel_name(),
-                                channel,
-                                file,
-                            );
-                            match storage_clone.remove(&file) {
-                                Ok(_) => {
-                                    increment_counter!(metric::CNT_RM_FILES);
-                                    info!("TTL cache removed {}", &file);
+                match cloned_client.get_connection() {
+                    Ok(mut con) => {
+                        let mut pubsub = con.as_pubsub();
+                        trace!("subscribe to cache key pattern: {}", &id_clone);
+                        match pubsub.psubscribe(format!("__keyspace*__:{}*", &id_clone)) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                error!("Failed to psubscribe: {}", e);
+                                continue;
+                            }
+                        }
+                        pubsub
+                            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                            .unwrap();
+                        loop {
+                            // break if the associated cache object is about to be closed
+                            if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
+                            match pubsub.get_message() {
+                                Ok(msg) => {
+                                    let channel: String = msg.get_channel().unwrap();
+                                    let redis_key = &channel[channel.find(":").unwrap() + 1..];
+                                    let file = Self::from_redis_key(&id_clone, &redis_key);
+                                    trace!(
+                                        "channel '{}': {}, file: {}",
+                                        msg.get_channel_name(),
+                                        channel,
+                                        file,
+                                    );
+                                    match storage_clone.remove(&file) {
+                                        Ok(_) => {
+                                            increment_counter!(metric::CNT_RM_FILES);
+                                            info!("TTL cache removed {}", &file);
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to remove {}: {}", &file, e);
+                                        }
+                                    }
                                 }
                                 Err(e) => {
-                                    warn!("Failed to remove {}: {}", &file, e);
+                                    if e.kind() == redis::ErrorKind::IoError && e.is_timeout() {
+                                        // ignore timeout error, as expected
+                                    } else {
+                                        error!(
+                                            "Failed to get_message, retrying every 3s: {} {:?}",
+                                            e,
+                                            e.kind()
+                                        );
+                                        util::sleep_ms(3000);
+                                        break;
+                                    }
                                 }
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to get_message, retrying every 3s: {}", e);
-                            util::sleep_ms(3000);
-                            break;
-                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to get redis connection: {}", e);
+                        util::sleep_ms(3000);
                     }
                 }
             }
@@ -323,6 +367,8 @@ impl TtlRedisCache {
             ttl,
             redis_client,
             id: id.to_string(),
+            pending_close,
+            expiration_thread_handler: Some(expiration_thread_handler),
         }
     }
 
@@ -378,6 +424,20 @@ impl CachePolicy for TtlRedisCache {
     }
 }
 
+impl Drop for TtlRedisCache {
+    /// The spawned key expiration handler thread needs to be dropped.
+    fn drop(&mut self) {
+        self.pending_close
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(thread_handler) = self.expiration_thread_handler.take() {
+            thread_handler.join().unwrap();
+            trace!("spawned thread dropped.");
+        } else {
+            warn!("expiration_thread_handler is None! If the thread is not spawned in the first place, the cache may have not been working properly. Otherwise, a thread is leaked.");
+        }
+    }
+}
+
 #[derive(Hash, Eq, PartialEq, Debug)]
 pub struct CacheEntry<Metadata, Key, Value> {
     pub metadata: Metadata,
@@ -428,6 +488,7 @@ impl CachePolicy for NoCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::{self};
     use futures::StreamExt;
     use std::fs;
     use std::io;
@@ -440,7 +501,7 @@ mod tests {
             match self {
                 CacheData::TextData(text) => text.into_bytes(),
                 CacheData::BytesData(bytes) => bytes.to_vec(),
-                CacheData::ByteStream(mut stream) => {
+                CacheData::ByteStream(mut stream, ..) => {
                     let mut v = Vec::new();
                     while let Some(bytes_result) = stream.next().await {
                         if !bytes_result.is_ok() {
@@ -667,5 +728,16 @@ mod tests {
             cache_get!(lru_cache_2, "2").unwrap().to_vec().await,
             vec![2]
         );
+    }
+
+    #[tokio::test]
+    async fn cache_stream_size_valid() {
+        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 3, new_redis_client(), "stream_cache");
+        let bytes: Bytes = Bytes::from(vec![1, 1, 4]);
+        let stream = stream::iter(vec![Ok(bytes.clone())]);
+        let stream: Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> = Box::new(stream);
+        cache_put!(lru_cache, "na tsu", CacheData::ByteStream(stream, Some(3)));
+        let size = lru_cache.get_total_size();
+        assert_eq!(size, 3);
     }
 }

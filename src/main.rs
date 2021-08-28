@@ -13,13 +13,16 @@ use crate::error::Result;
 use crate::settings::Policy;
 use crate::settings::PolicyType;
 use crate::settings::Rule;
-use crate::task::SharedTaskManager;
 use crate::task::TaskManager;
+
 use metrics::increment_counter;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
+use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[macro_use]
 extern crate serde_derive;
@@ -28,9 +31,24 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
+pub type SharedTaskManager = Arc<TaskManager>;
+pub type LockedSharedTaskManager = RwLock<TaskManager>;
+pub type FuckTM = Arc<std::sync::RwLock<TaskManager>>;
+
+lazy_static::lazy_static! {
+    static ref TASK_MANAGER: LockedSharedTaskManager = {
+        let app_settings = settings::Settings::new().unwrap();
+        let mut tm = TaskManager::new(app_settings.clone());
+        tm.refresh_config(&app_settings);
+        RwLock::new(tm)
+    };
+}
+
 #[tokio::main]
 async fn main() {
     let app_settings = settings::Settings::new().unwrap();
+    let port = app_settings.port;
+    let api = filters::root();
 
     // initialize the logger
     let mut log_builder = pretty_env_logger::formatted_builder();
@@ -39,42 +57,6 @@ async fn main() {
         .filter_module("tracing::span", log::LevelFilter::Error)
         .filter_level(app_settings.get_log_level())
         .init();
-
-    let port = app_settings.port;
-
-    let redis_url = app_settings.get_redis_url();
-    let policies = app_settings.policies.clone();
-    let pypi_index_rule = app_settings.builtin.clone().pypi_index;
-    let pypi_pkg_rule = app_settings.builtin.clone().pypi_packages;
-    let anaconda_index_rule = app_settings.builtin.clone().anaconda_index;
-    let anaconda_pkg_rule = app_settings.builtin.clone().anaconda_packages;
-
-    let mut tm = TaskManager::new(app_settings.clone());
-
-    let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
-    let pypi_index_cache =
-        create_cache_from_rule(&pypi_index_rule, &policies, Some(redis_client.clone())).unwrap();
-    let pypi_pkg_cache =
-        create_cache_from_rule(&pypi_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
-    let anaconda_index_cache =
-        create_cache_from_rule(&anaconda_index_rule, &policies, Some(redis_client.clone()))
-            .unwrap();
-    let anaconda_pkg_cache =
-        create_cache_from_rule(&anaconda_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
-
-    tm.pypi_index_cache = pypi_index_cache;
-    tm.pypi_pkg_cache = pypi_pkg_cache;
-    tm.anaconda_index_cache = anaconda_index_cache;
-    tm.anaconda_pkg_cache = anaconda_pkg_cache;
-
-    for (idx, rule) in app_settings.rules.iter().enumerate() {
-        debug!("creating rule #{}: {:?}", idx, rule);
-        let cache = create_cache_from_rule(rule, &policies, Some(redis_client.clone())).unwrap();
-        tm.add_cache(idx, cache);
-    }
-
-    let shared_tm = Arc::new(tm);
-    let api = filters::root(shared_tm);
 
     // init metrics
     let builder = PrometheusBuilder::new();
@@ -87,6 +69,32 @@ async fn main() {
         .install()
         .expect("failed to install Prometheus recorder");
     metric::register_counters();
+
+    // Watcher::
+    // We listen to file changes by giving Notify
+    // a function that will get called when events happen
+    let mut watcher =
+        // To make sure that the config lives as long as the function
+        // we need to move the ownership of the config inside the function
+        // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
+        RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
+            let event = result.unwrap();
+            if event.kind.is_modify() {
+                util::sleep_ms(2000);
+                // update config:
+                futures::executor::block_on(async {
+                    match settings::Settings::new() {
+                        Ok(settings) => TASK_MANAGER.write().await.refresh_config(&settings),
+                        Err(e) => {
+                                error!("Failed to load config: {}. Use the original config.", e);
+                        }
+                    }
+                })
+            }
+        }).unwrap();
+    watcher
+        .watch(Path::new("config.yml"), RecursiveMode::Recursive)
+        .unwrap();
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
@@ -127,14 +135,10 @@ fn create_cache_from_rule(
 }
 
 mod filters {
-    use super::handlers;
     use super::*;
-    use std::convert::Infallible;
     use warp::Filter;
 
-    pub fn root(
-        shared_tm: SharedTaskManager,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    pub fn root() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         let log = warp::log::custom(|info| {
             info!(
                 "🌐 {} {} Response: {}",
@@ -144,52 +148,33 @@ mod filters {
             );
         });
 
-        pypi_index(shared_tm.clone())
-            .or(pypi_packages(shared_tm.clone()))
-            .or(anaconda_all(shared_tm.clone()))
-            .or(fallback(shared_tm.clone()))
+        pypi_index()
+            .or(pypi_packages())
+            .or(anaconda_all())
+            .or(fallback())
             .with(log)
     }
 
-    fn with_tm(
-        tm: SharedTaskManager,
-    ) -> impl Filter<Extract = (SharedTaskManager,), Error = Infallible> + Clone {
-        warp::any().map(move || tm.clone())
+    /// GET /pypi/web/simple/:string
+    fn pypi_index() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("pypi" / "simple" / String).and_then(handlers::get_pypi_index)
     }
 
-    // GET /pypi/web/simple/:string
-    fn pypi_index(
-        tm: SharedTaskManager,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path!("pypi" / "simple" / String)
-            .and(with_tm(tm))
-            .and_then(handlers::get_pypi_index)
-    }
-
-    // GET /pypi/package/:string/:string/:string/:string
-    fn pypi_packages(
-        tm: SharedTaskManager,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    /// GET /pypi/package/:string/:string/:string/:string
+    fn pypi_packages() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         warp::path!("pypi" / "packages" / String / String / String / String)
-            .and(with_tm(tm))
             .and_then(handlers::get_pypi_pkg)
     }
 
-    // GET /anaconda/:repo/:arch/:filename
-    fn anaconda_all(
-        tm: SharedTaskManager,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path!("anaconda" / String / String / String)
-            .and(with_tm(tm))
-            .and_then(handlers::get_anaconda)
+    /// GET /anaconda/:repo/:arch/:filename
+    fn anaconda_all() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::path!("anaconda" / String / String / String).and_then(handlers::get_anaconda)
     }
 
-    fn fallback(
-        tm: SharedTaskManager,
-    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    /// fallback handler, matches all paths
+    fn fallback() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         warp::path::tail()
             .map(|tail: warp::filters::path::Tail| tail.as_str().to_string())
-            .and(with_tm(tm))
             .and_then(handlers::fallback_handler)
     }
 }
@@ -200,13 +185,11 @@ mod handlers {
     use std::result::Result;
     use warp::{Rejection, Reply};
 
-    pub async fn get_pypi_index(
-        path: String,
-        tm: SharedTaskManager,
-    ) -> Result<impl warp::Reply, Rejection> {
+    pub async fn get_pypi_index(path: String) -> Result<impl warp::Reply, Rejection> {
         increment_counter!(metric::COUNTER_PYPI_INDEX_REQUESTS);
         let tw = Task::PypiIndexTask { pkg_name: path };
-        match tw.resolve(tm).await {
+        let tm = TASK_MANAGER.read().await;
+        match tm.resolve_task(&tw).await {
             Ok(data) => {
                 increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_SUCCESS);
                 let mut warp_resp: warp::reply::Response = data.into_response();
@@ -227,12 +210,12 @@ mod handlers {
         seg1: String,
         seg2: String,
         seg3: String,
-        tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
         increment_counter!(metric::COUNTER_PYPI_PKGS_REQ);
         let fullpath = format!("{}/{}/{}/{}", seg0, seg1, seg2, seg3);
         let t = Task::PypiPackagesTask { pkg_path: fullpath };
-        match t.resolve(tm).await {
+        let tm = TASK_MANAGER.read().await;
+        match tm.resolve_task(&t).await {
             Ok(data) => Ok(data),
             Err(e) => {
                 error!("{}", e);
@@ -245,9 +228,9 @@ mod handlers {
         channel: String,
         arch: String,
         filename: String,
-        tm: SharedTaskManager,
     ) -> Result<impl warp::Reply, Rejection> {
         increment_counter!(metric::COUNTER_ANACONDA_REQ);
+        let tm = TASK_MANAGER.read().await;
         let cache_key = format!("{}/{}/{}", channel, arch, filename);
         let t;
         if filename.ends_with(".json") {
@@ -255,7 +238,7 @@ mod handlers {
         } else {
             t = Task::AnacondaPackagesTask { path: cache_key };
         }
-        match t.resolve(tm).await {
+        match tm.resolve_task(&t).await {
             Ok(data) => Ok(data),
             Err(e) => {
                 error!("{}", e);
@@ -264,11 +247,9 @@ mod handlers {
         }
     }
 
-    pub async fn fallback_handler(
-        path: String,
-        tm: SharedTaskManager,
-    ) -> Result<impl warp::Reply, Rejection> {
+    pub async fn fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
         // Dynamically dispatch tasks defined in config file
+        let tm = TASK_MANAGER.read().await.clone();
         let config = &tm.config;
         for (idx, rule) in config.rules.iter().enumerate() {
             let upstream = rule.upstream.clone();
@@ -281,7 +262,7 @@ mod handlers {
                         rule_id: idx,
                         url: String::from(replaced),
                     };
-                    if let Ok(data) = t.resolve(tm.clone()).await {
+                    if let Ok(data) = tm.resolve_task(&t).await {
                         return Ok(data);
                     }
                 }
@@ -299,23 +280,23 @@ mod test {
     use warp::test::request;
     use warp::Filter;
 
+    async fn setup() {
+        println!("setup!");
+        TASK_MANAGER.write().await.refresh_config(&get_settings());
+    }
+
     fn get_settings() -> Settings {
-        info!(
-            "{:?}",
-            settings::Settings::new_from("config-test", "app_test").unwrap()
-        );
         settings::Settings::new_from("config-test", "app_test").unwrap()
     }
 
     fn get_filter_root() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone
     {
-        let app_settings = get_settings();
-        let tm = TaskManager::new(app_settings.clone());
-        filters::root(Arc::new(tm))
+        filters::root()
     }
 
     #[tokio::test]
     async fn get_pypi_index() {
+        setup().await;
         let app_url = get_settings().url.unwrap();
         let pkg_name = "hello-world";
         let api = get_filter_root();

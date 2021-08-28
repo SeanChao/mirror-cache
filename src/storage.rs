@@ -18,7 +18,7 @@ async fn fs_persist(root_dir: &str, name: &str, data: &mut CacheData) {
     fs::create_dir_all(parent_dirs).unwrap();
     let mut f = fs::File::create(path).unwrap();
     match data {
-        CacheData::ByteStream(stream) => {
+        CacheData::ByteStream(stream, ..) => {
             while let Some(v) = stream.next().await {
                 f.write_all(v.unwrap().as_ref()).unwrap()
             }
@@ -49,8 +49,9 @@ impl Storage {
             Storage::FileSystem { root_dir, .. } => {
                 let mut path = PathBuf::from(root_dir);
                 path.push(name);
+                let len = fs::metadata(&path).unwrap().len(); // actually we don't need to know the size here
                 match get_file_stream(&path).await {
-                    Ok(stream) => Ok(CacheData::ByteStream(Box::new(stream))),
+                    Ok(stream) => Ok(CacheData::ByteStream(Box::new(stream), Some(len as usize))),
                     Err(e) => Err(e),
                 }
             }
