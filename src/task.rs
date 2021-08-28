@@ -28,7 +28,7 @@ pub enum Task {
 pub enum TaskResponse {
     StringResponse(String),
     BytesResponse(Bytes),
-    StreamResponse(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + Sync>>),
+    StreamResponse(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>),
 }
 
 impl From<String> for TaskResponse {
@@ -42,7 +42,7 @@ impl From<CacheData> for TaskResponse {
         match cache_data {
             CacheData::TextData(text) => text.into(),
             CacheData::BytesData(bytes) => TaskResponse::BytesResponse(bytes),
-            CacheData::ByteStream(stream) => TaskResponse::StreamResponse(Box::pin(stream)),
+            CacheData::ByteStream(stream, ..) => TaskResponse::StreamResponse(Box::pin(stream)),
         }
     }
 }
@@ -264,12 +264,17 @@ impl TaskManager {
                             };
                             c.put(&task_clone.to_key(), content.into()).await;
                         } else {
+                            let len = res.content_length();
                             let bytestream = res.bytes_stream();
                             c.put(
                                 &task_clone.to_key(),
-                                CacheData::ByteStream(Box::new(
-                                    bytestream.map(move |x| x.map_err(|e| Error::RequestError(e))),
-                                )),
+                                CacheData::ByteStream(
+                                    Box::new(
+                                        bytestream
+                                            .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                                    ),
+                                    len.map(|x| x as usize),
+                                ),
                             )
                             .await;
                         }

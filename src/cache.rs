@@ -16,7 +16,10 @@ use std::vec::Vec;
 pub enum CacheData {
     TextData(String),
     BytesData(Bytes),
-    ByteStream(Box<dyn Stream<Item = Result<Bytes>> + Send + Sync + Unpin>),
+    ByteStream(
+        Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>,
+        Option<usize>,
+    ), // stream and size
 }
 
 impl CacheData {
@@ -24,7 +27,7 @@ impl CacheData {
         match &self {
             CacheData::TextData(text) => text.len(),
             CacheData::BytesData(bytes) => bytes.len(),
-            _ => 0, // TODO: length for stream
+            CacheData::ByteStream(_, size) => size.unwrap(),
         }
     }
 }
@@ -47,6 +50,12 @@ impl From<Vec<u8>> for CacheData {
     }
 }
 
+// impl From<Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>> for CacheData {
+//     fn from(stream: Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>) -> CacheData {
+//         CacheData::ByteStream(stream)
+//     }
+// }
+
 impl AsRef<[u8]> for CacheData {
     fn as_ref(&self) -> &[u8] {
         // TODO:
@@ -64,7 +73,14 @@ impl fmt::Debug for CacheData {
         match &self {
             CacheData::TextData(s) => f.field("TextData", s),
             CacheData::BytesData(b) => f.field("Bytes", b),
-            CacheData::ByteStream(_) => f.field("ByteStream", &"...".to_string()),
+            CacheData::ByteStream(_, size) => f.field(
+                "ByteStream",
+                &format!(
+                    "(stream of size {})",
+                    size.map(|x| format!("{}", x))
+                        .unwrap_or("unknown".to_string())
+                ),
+            ),
         };
         f.finish()
     }
@@ -428,6 +444,7 @@ impl CachePolicy for NoCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::{self};
     use futures::StreamExt;
     use std::fs;
     use std::io;
@@ -440,7 +457,7 @@ mod tests {
             match self {
                 CacheData::TextData(text) => text.into_bytes(),
                 CacheData::BytesData(bytes) => bytes.to_vec(),
-                CacheData::ByteStream(mut stream) => {
+                CacheData::ByteStream(mut stream, ..) => {
                     let mut v = Vec::new();
                     while let Some(bytes_result) = stream.next().await {
                         if !bytes_result.is_ok() {
@@ -667,5 +684,16 @@ mod tests {
             cache_get!(lru_cache_2, "2").unwrap().to_vec().await,
             vec![2]
         );
+    }
+
+    #[tokio::test]
+    async fn cache_stream_size_valid() {
+        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 3, new_redis_client(), "stream_cache");
+        let bytes: Bytes = Bytes::from(vec![1, 1, 4]);
+        let stream = stream::iter(vec![Ok(bytes.clone())]);
+        let stream: Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> = Box::new(stream);
+        cache_put!(lru_cache, "na tsu", CacheData::ByteStream(stream, Some(3)));
+        let size = lru_cache.get_total_size();
+        assert_eq!(size, 3);
     }
 }
