@@ -296,6 +296,9 @@ impl TtlRedisCache {
         let expiration_thread_handler = std::thread::spawn(move || {
             debug!("TTL expiration listener is created!");
             loop {
+                if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
                 match cloned_client.get_connection() {
                     Ok(mut con) => {
                         let mut pubsub = con.as_pubsub();
