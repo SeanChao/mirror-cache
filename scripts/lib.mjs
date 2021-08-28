@@ -5,7 +5,7 @@ export function pip_install(name, proxy) {
 	--network host \
 	python \
 	python -m \
-	pip install \
+	pip download \
 	-i ${proxy} \
 	--disable-pip-version-check \
 	--no-cache-dir \
@@ -19,6 +19,7 @@ export function conda_install(name, proxy) {
 	--network host \
 	continuumio/miniconda3 conda \
 	install \
+	--download-only \
 	-v \
 	-y \
 	-c ${proxy} \

@@ -7,6 +7,7 @@ docker \
 	--network host \
 	continuumio/miniconda3 conda \
 	install \
+	--download-only \
 	-v \
 	-y \
 	-c ${MIRROR} \
