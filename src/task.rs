@@ -1,9 +1,11 @@
-use crate::cache::{CacheData, CachePolicy, NoCache};
+use crate::cache::{CacheData, CachePolicy, LruRedisCache, NoCache, TtlRedisCache};
 use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
 use crate::settings::Settings;
+use crate::settings::{Policy, PolicyType};
 use crate::util;
+
 use bytes::Bytes;
 use futures::Stream;
 use futures::StreamExt;
@@ -27,6 +29,8 @@ pub enum TaskResponse {
     StringResponse(String),
     BytesResponse(Bytes),
     StreamResponse(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>),
+    // RawResponse(impl warp::Reply)
+    Redirect(warp::reply::WithHeader<warp::http::StatusCode>),
 }
 
 impl From<String> for TaskResponse {
@@ -53,6 +57,7 @@ impl warp::Reply for TaskResponse {
             TaskResponse::StreamResponse(stream) => {
                 warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream))
             }
+            TaskResponse::Redirect(r) => r.into_response(),
         }
     }
 }
@@ -88,11 +93,10 @@ pub struct TaskManager {
     pub pypi_pkg_cache: Arc<dyn CachePolicy>,
     pub anaconda_index_cache: Arc<dyn CachePolicy>,
     pub anaconda_pkg_cache: Arc<dyn CachePolicy>,
-    pub cache_map: HashMap<RuleId, Arc<dyn CachePolicy>>,
+    /// RuleId -> (cache, size_limit)
+    pub rule_map: HashMap<RuleId, (Arc<dyn CachePolicy>, usize)>,
     task_set: Arc<RwLock<HashSet<Task>>>,
 }
-
-use crate::create_cache_from_rule;
 
 impl TaskManager {
     pub fn new(config: Settings) -> Self {
@@ -102,7 +106,7 @@ impl TaskManager {
             pypi_pkg_cache: Arc::new(NoCache {}),
             anaconda_index_cache: Arc::new(NoCache {}),
             anaconda_pkg_cache: Arc::new(NoCache {}),
-            cache_map: HashMap::new(),
+            rule_map: HashMap::new(),
             task_set: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -155,9 +159,8 @@ impl TaskManager {
             increment_counter!(metric::COUNTER_CACHE_HIT);
             return Ok(data.into());
         }
-        // cache miss, dispatch async cache task
         increment_counter!(metric::COUNTER_CACHE_MISS);
-        let _ = self.spawn_task(task.clone()).await;
+        // cache miss
         // fetch from upstream
         let remote_url = self.resolve_task_upstream(&task);
         info!(
@@ -172,6 +175,19 @@ impl TaskManager {
                         res.status().canonical_reason().unwrap_or("unknown").into(),
                     ));
                 }
+                // if the response is too large, respond users with a redirect to upstream
+                if let Some(content_length) = res.content_length() {
+                    let size_limit = self.get_task_size_limit(&task);
+                    if size_limit != 0 && size_limit < content_length as usize {
+                        return Ok(TaskResponse::Redirect(warp::reply::with_header(
+                            warp::http::StatusCode::FOUND,
+                            "Location",
+                            remote_url,
+                        )));
+                    }
+                }
+                // dispatch async cache task
+                let _ = self.spawn_task(task.clone()).await;
                 match &task {
                     Task::PypiIndexTask { .. } => {
                         let text_content = res.text().await.unwrap();
@@ -194,6 +210,7 @@ impl TaskManager {
         }
     }
 
+    /// for each rule, create associated cache if the policy has not been created
     pub fn refresh_config(&mut self, settings: &Settings) {
         let app_settings = settings;
         let redis_url = app_settings.get_redis_url();
@@ -205,35 +222,84 @@ impl TaskManager {
 
         let mut tm = self;
         tm.config = app_settings.clone();
-        let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
-        let pypi_index_cache =
-            create_cache_from_rule(&pypi_index_rule, &policies, Some(redis_client.clone()))
-                .unwrap();
-        let pypi_pkg_cache =
-            create_cache_from_rule(&pypi_pkg_rule, &policies, Some(redis_client.clone())).unwrap();
-        let anaconda_index_cache =
-            create_cache_from_rule(&anaconda_index_rule, &policies, Some(redis_client.clone()))
-                .unwrap();
-        let anaconda_pkg_cache =
-            create_cache_from_rule(&anaconda_pkg_rule, &policies, Some(redis_client.clone()))
-                .unwrap();
 
-        // let old_arc = tm.pypi_index_cache.clone();
-        // println!("old {} {}", Arc::weak_count(&old_arc), Arc::strong_count(&old_arc));
-        // println!("new {} {}", Arc::weak_count(&old_arc), Arc::strong_count(&old_arc));
+        let mut policy_map: HashSet<String> = HashSet::new(); // used to avoid create duplicated cache if some rules share the same policy
+                                                              // get active policy set
+        policy_map.insert(pypi_index_rule.policy.clone());
+        policy_map.insert(pypi_pkg_rule.policy.clone());
+        policy_map.insert(anaconda_index_rule.policy.clone());
+        policy_map.insert(anaconda_pkg_rule.policy.clone());
+        for rule in &app_settings.rules {
+            policy_map.insert(rule.policy.clone());
+        }
+
+        let mut cache_map: HashMap<String, Arc<dyn CachePolicy>> = HashMap::new();
+        let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
+        // create cache for each policy
+        for policy in &policy_map {
+            let cache =
+                Self::create_cache_from_rule(&policy, &policies, Some(redis_client.clone()));
+            cache_map.insert(policy.to_string(), cache.unwrap());
+        }
+
+        let pypi_index_cache = cache_map.get(&pypi_index_rule.policy).unwrap().clone();
+        let pypi_pkg_cache = cache_map.get(&pypi_pkg_rule.policy).unwrap().clone();
+        let anaconda_index_cache = cache_map.get(&anaconda_index_rule.policy).unwrap().clone();
+        let anaconda_pkg_cache = cache_map.get(&anaconda_pkg_rule.policy).unwrap().clone();
         tm.pypi_index_cache = pypi_index_cache;
         tm.pypi_pkg_cache = pypi_pkg_cache;
         tm.anaconda_index_cache = anaconda_index_cache;
         tm.anaconda_pkg_cache = anaconda_pkg_cache;
 
-        tm.cache_map.clear();
+        tm.rule_map.clear();
         for (idx, rule) in app_settings.rules.iter().enumerate() {
             debug!("creating rule #{}: {:?}", idx, rule);
-            let cache =
-                create_cache_from_rule(rule, &policies, Some(redis_client.clone())).unwrap();
-            tm.add_cache(idx, cache);
+            let cache = cache_map.get(&rule.policy).unwrap().clone();
+            tm.rule_map.insert(
+                idx,
+                (
+                    cache,
+                    rule.size_limit
+                        .clone()
+                        .map_or(0, |x| bytefmt::parse(x).unwrap() as usize),
+                ),
+            );
         }
-        info!("config reloaded {:?}", &settings);
+    }
+
+    fn create_cache_from_rule(
+        policy_name: &str,
+        policies: &Vec<Policy>,
+        redis_client: Option<redis::Client>,
+    ) -> Result<Arc<dyn CachePolicy>> {
+        let policy_ident = policy_name;
+        for (idx, p) in policies.iter().enumerate() {
+            if p.name == policy_ident {
+                let policy_type = p.typ;
+                match policy_type {
+                    PolicyType::Lru => {
+                        return Ok(Arc::new(LruRedisCache::new(
+                            p.path.as_ref().unwrap(),
+                            p.size.unwrap_or(0),
+                            redis_client.unwrap(),
+                            &format!("lru_rule_{}", idx),
+                        )));
+                    }
+                    PolicyType::Ttl => {
+                        return Ok(Arc::new(TtlRedisCache::new(
+                            p.path.as_ref().unwrap(),
+                            p.timeout.unwrap_or(0),
+                            redis_client.unwrap(),
+                            &format!("ttl_rule_{}", idx),
+                        )));
+                    }
+                };
+            }
+        }
+        Err(Error::ConfigInvalid(format!(
+            "No such policy: {}",
+            policy_ident
+        )))
     }
 
     async fn taskset_contains(&self, t: &Task) -> bool {
@@ -383,15 +449,44 @@ impl TaskManager {
         }
     }
 
-    pub fn add_cache(&mut self, rule_id: RuleId, cache: Arc<dyn CachePolicy>) {
-        // insert cache into cache map
-        self.cache_map.insert(rule_id, cache);
+    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn CachePolicy>> {
+        match self.rule_map.get(&rule_id) {
+            Some(tuple) => Some(tuple.0.clone()),
+            None => None,
+        }
     }
 
-    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn CachePolicy>> {
-        match self.cache_map.get(&rule_id) {
-            Some(cache) => Some(cache.clone()),
-            None => None,
+    pub fn get_task_size_limit(&self, task: &Task) -> usize {
+        match task {
+            Task::PypiIndexTask { .. } => self
+                .config
+                .builtin
+                .pypi_index
+                .size_limit
+                .as_ref()
+                .map_or(0, |x| bytefmt::parse(x).unwrap() as usize),
+            Task::PypiPackagesTask { .. } => self
+                .config
+                .builtin
+                .pypi_packages
+                .size_limit
+                .as_ref()
+                .map_or(0, |x| bytefmt::parse(x).unwrap() as usize),
+            Task::AnacondaIndexTask { .. } => self
+                .config
+                .builtin
+                .anaconda_index
+                .size_limit
+                .as_ref()
+                .map_or(0, |x| bytefmt::parse(x).unwrap() as usize),
+            Task::AnacondaPackagesTask { .. } => self
+                .config
+                .builtin
+                .anaconda_packages
+                .size_limit
+                .as_ref()
+                .map_or(0, |x| bytefmt::parse(x).unwrap() as usize),
+            Task::Others { rule_id, .. } => self.rule_map.get(&rule_id).unwrap().1,
         }
     }
 }

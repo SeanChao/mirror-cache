@@ -24,6 +24,7 @@ pub struct Rule {
     pub target: Option<String>,
     pub policy: String,
     pub upstream: String,
+    pub size_limit: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

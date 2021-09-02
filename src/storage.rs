@@ -1,5 +1,5 @@
 use crate::cache::CacheData;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -49,10 +49,17 @@ impl Storage {
             Storage::FileSystem { root_dir, .. } => {
                 let mut path = PathBuf::from(root_dir);
                 path.push(name);
-                let len = fs::metadata(&path).unwrap().len(); // actually we don't need to know the size here
-                match get_file_stream(&path).await {
-                    Ok(stream) => Ok(CacheData::ByteStream(Box::new(stream), Some(len as usize))),
-                    Err(e) => Err(e),
+                match fs::metadata(&path) {
+                    Ok(metadata) => {
+                        let len = metadata.len(); // actually we don't need to know the size here
+                        match get_file_stream(&path).await {
+                            Ok(stream) => {
+                                Ok(CacheData::ByteStream(Box::new(stream), Some(len as usize)))
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(e) => Err(Error::IoError(e)),
                 }
             }
         }
