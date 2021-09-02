@@ -11,7 +11,7 @@ See [config-rs](https://github.com/mehcode/config-rs) for supported formats.
 
 Exporting environment variables can override settings in the config file. All environment variables should be prefixed with `APP_`, Eg: `export APP_PORT=2333` overrides the `port` field to `2333`.
 
-### Common Options
+#### Common Options
 
 `port` specifies the port number to listen on.
 
@@ -19,11 +19,11 @@ Exporting environment variables can override settings in the config file. All en
 
 `log_level` specifies the log level. Allowed values are `trace`, `debug`, `info`, `warn`, `error`.
 
-### Redis
+#### Redis
 
 `url` is the Redis connection string.
 
-### Builtin
+#### Builtin
 
 In the builtin section, you can customize settings of the builtin rules.
 
@@ -36,21 +36,28 @@ We currently support the following mirror rules:
 
 You may configure the policy and upstream for these rules.
 
-### Rules
+#### Rules
 
 Rules are an array of customized proxy rules.
 
 - path: the path to match, supports regular expression
 - policy: the name of policy to use, defined in `policies`
 - upstream: the upstream of the path, the reverse proxy will try to fetch targets from the upstream
+- size_limit: The maximum size of package that the program would fetch and cache. If the size of the package exceeds the number, the response will be a `302 Found` to the upstream url. Use `0` for unlimited size. The default value is `0`.
 
-### Policies
+#### Policies
 
 Policies are an array of customized cache policies.
 
 - name: the unique name of the policy
 - type: the type of the policy, see [Cache Policies](#cache-policies) for details
 - path: the path of cached data
+
+### Hot reloading
+
+Any changes on `config.yml` will trigger a configuration reload after a delay of 2 secs.
+
+Note that some configurations like `port` and `log_level` cannot be updated.
 
 ## Cache Policies
 
