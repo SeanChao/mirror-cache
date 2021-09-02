@@ -13,6 +13,7 @@ builtin:
   pypi_packages:
     policy: "policy_lru"
     upstream: "https://files.pythonhosted.org/packages"
+    size_limit: "1 GB"
   anaconda_index:
     policy: "policy_ttl_60"
     upstream: "https://repo.anaconda.com/pkgs"

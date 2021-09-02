@@ -6,7 +6,13 @@
   </a>
 </div>
 
-A smart reverse proxy supporting multiple cache policies and customized rules, for mirror sites and also personal users!
+A reverse proxy supporting multiple cache policies, customized rules, configuration hot reloading. For mirror sites and also personal users!
+
+## Features
+
+- Cache your dependencies on limited disk space with LRU/TTL cache policies
+- Reload updated config without restarting the program
+- Support customized rules
 
 ## Quick start
 

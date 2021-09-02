@@ -7,12 +7,6 @@ mod storage;
 mod task;
 mod util;
 
-use crate::cache::CachePolicy;
-use crate::error::Error;
-use crate::error::Result;
-use crate::settings::Policy;
-use crate::settings::PolicyType;
-use crate::settings::Rule;
 use crate::task::TaskManager;
 
 use metrics::increment_counter;
@@ -84,9 +78,11 @@ async fn main() {
                 // update config:
                 futures::executor::block_on(async {
                     match settings::Settings::new() {
-                        Ok(settings) => TASK_MANAGER.write().await.refresh_config(&settings),
+                        Ok(settings) => {TASK_MANAGER.write().await.refresh_config(&settings);
+                            info!("config updated");
+                        },
                         Err(e) => {
-                                error!("Failed to load config: {}. Use the original config.", e);
+                            error!("Failed to load config: {}. Use the original config.", e);
                         }
                     }
                 })
@@ -97,41 +93,6 @@ async fn main() {
         .unwrap();
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
-}
-
-fn create_cache_from_rule(
-    rule: &Rule,
-    policies: &Vec<Policy>,
-    redis_client: Option<redis::Client>,
-) -> Result<Arc<dyn CachePolicy>> {
-    let policy_ident = rule.policy.clone();
-    for (idx, p) in policies.iter().enumerate() {
-        if p.name == policy_ident {
-            let policy_type = p.typ;
-            match policy_type {
-                PolicyType::Lru => {
-                    return Ok(Arc::new(cache::LruRedisCache::new(
-                        p.path.as_ref().unwrap(),
-                        p.size.unwrap_or(0),
-                        redis_client.unwrap(),
-                        &format!("lru_rule_{}", idx),
-                    )));
-                }
-                PolicyType::Ttl => {
-                    return Ok(Arc::new(cache::TtlRedisCache::new(
-                        p.path.as_ref().unwrap(),
-                        p.timeout.unwrap_or(0),
-                        redis_client.unwrap(),
-                        &format!("ttl_rule_{}", idx),
-                    )));
-                }
-            };
-        }
-    }
-    Err(Error::ConfigInvalid(format!(
-        "failed to find a matched policy for rule {:?}",
-        rule
-    )))
 }
 
 mod filters {
