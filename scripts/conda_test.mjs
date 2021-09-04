@@ -4,7 +4,7 @@ $.quote = (v) => v
 
 let exitCode = 0;
 try {
-	const mirror = 'http://localhost:9000/anaconda/main'
+	const mirror = 'http://localhost:9000/anaconda/pkgs/main'
 	await $`${conda_install('django', mirror)}`
 
 	// concurrent

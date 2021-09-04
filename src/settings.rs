@@ -10,7 +10,6 @@ pub struct Settings {
     pub log_level: String,
     pub rules: Vec<Rule>,
     pub policies: Vec<Policy>,
-    pub builtin: BuiltinRules,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -20,11 +19,11 @@ struct Redis {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Rule {
-    pub path: Option<String>,
-    pub target: Option<String>,
+    pub path: String,
     pub policy: String,
     pub upstream: String,
     pub size_limit: Option<String>,
+    pub rewrite: Option<Vec<Rewrite>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -38,11 +37,17 @@ pub struct Policy {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct BuiltinRules {
-    pub pypi_index: Rule,
-    pub pypi_packages: Rule,
-    pub anaconda_index: Rule,
-    pub anaconda_packages: Rule,
+pub struct Rewrite {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Deserialize, Copy, Clone)]
+pub enum PathType {
+    #[serde(rename = "prefix")]
+    Prefix,
+    #[serde(rename = "regex")]
+    Regex,
 }
 
 #[derive(Debug, Deserialize, Copy, Clone)]
@@ -63,19 +68,7 @@ impl Settings {
         s.merge(File::with_name(filename))?;
         s.merge(Environment::with_prefix(env_prefix))?;
         match s.try_into() {
-            Ok(settings) => {
-                // TODO: constraints checking
-                let settings: Self = settings;
-                for r in &settings.rules {
-                    if r.target.is_none() && r.path.is_none() {
-                        return Err(Error::ConfigInvalid(format!(
-                            "one of target and path must be specified. (in rule {:?})",
-                            r
-                        )));
-                    }
-                }
-                Ok(settings)
-            }
+            Ok(settings) => Ok(settings),
             Err(e) => Err(Error::ConfigDeserializeError(e)),
         }
     }
