@@ -1,27 +1,43 @@
 port: 9000
 url: http://localhost:9000 # url of this app
 # log level: error / warn / info / debug / trace, default level is info
-log_level: info
+log_level: trace
 
 redis:
   url: redis://localhost
 
-builtin:
-  pypi_index:
-    policy: "policy_ttl_60"
-    upstream: "https://pypi.org/simple"
-  pypi_packages:
-    policy: "policy_lru"
-    upstream: "https://files.pythonhosted.org/packages"
-    size_limit: "1 GB"
-  anaconda_index:
-    policy: "policy_ttl_60"
-    upstream: "https://repo.anaconda.com/pkgs"
-  anaconda_packages:
-    policy: "policy_lru_anaconda"
-    upstream: "https://repo.anaconda.com/pkgs"
-
 rules:
+  # PyPI index
+  - path: "pypi/simple/"
+    upstream: "https://pypi.org/simple/"
+    rewrite:
+      - from: "https://files.pythonhosted.org/"
+        to: "http://localhost:9000/pypi/"
+    policy: "policy_ttl_60"
+  # PyPI packages
+  - path: "pypi/packages/"
+    upstream: "https://files.pythonhosted.org/packages/"
+    policy: "policy_lru"
+
+  # Anaconda index [main]
+  - path: 'anaconda/pkgs/main/(.*\.repodata.json(.bz2)?)'
+    upstream: "https://repo.anaconda.com/pkgs/main/$1"
+    policy: "policy_ttl_60"
+  # Anaconda packages [main]
+  - path: "anaconda/pkgs/main"
+    upstream: "https://repo.anaconda.com/pkgs/main"
+    policy: "policy_lru_anaconda"
+
+  # Anaconda cloud index
+  - path: 'anaconda/cloud/(.*\.repodata.json(.bz2)?)'
+    upstream: "https://conda.anaconda.org/$1"
+    policy: "policy_ttl_60"
+  # Anaconda cloud packages
+  - path: "anaconda/cloud/"
+    upstream: "https://conda.anaconda.org/"
+    policy: "policy_lru_anaconda"
+
+  # Ubuntu
   - path: "ubuntu/dists/(.*)/(.*)"
     policy: "policy_ubuntu"
     upstream: "http://archive.ubuntu.com/ubuntu/dists/$1/$2"

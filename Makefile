@@ -60,6 +60,7 @@ clean:
 scenario_test:
 	zx ./scripts/pip_test.mjs
 	zx ./scripts/conda_test.mjs
+	zx ./scripts/conda_cloud_test.mjs
 	zx ./scripts/stress.mjs
 
 metrics:

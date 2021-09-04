@@ -1,37 +1,56 @@
 port: 9001
 debug: true
-url: https://localhost:9001
+url: http://localhost:9001
 log_level: trace
 
 redis:
   url: redis://localhost:3001
 
-builtin:
-  pypi_index:
-    policy: "policy_ttl_3"
-    upstream: "https://pypi.org/simple"
-  pypi_packages:
-    policy: "policy_lru_1k"
-    upstream: "https://files.pythonhosted.org"
-  anaconda_index:
-    policy: "policy_ttl_3"
-    upstream: "https://repo.anaconda.com/pkgs"
-  anaconda_packages:
-    policy: "policy_lru_anaconda"
-    upstream: "https://repo.anaconda.com/pkgs"
+rules:
+  # PyPI index
+  - path: "pypi/simple/"
+    upstream: "https://pypi.org/simple/"
+    rewrite:
+      - from: "https://files.pythonhosted.org/"
+        to: "http://localhost:9001/pypi/"
+    policy: "policy_ttl"
+  # PyPI packages
+  - path: "pypi/packages/"
+    upstream: "https://files.pythonhosted.org/packages/"
+    policy: "policy_lru"
 
-rules: []
+  # Anaconda index [main]
+  - path: 'anaconda/pkgs/main/(.*\.repodata.json(.bz2)?)'
+    upstream: "https://repo.anaconda.com/pkgs/main/$1"
+    policy: "policy_ttl"
+  # Anaconda packages [main]
+  - path: "anaconda/pkgs/main"
+    upstream: "https://repo.anaconda.com/pkgs/main"
+    policy: "policy_lru_anaconda"
+
+  # Anaconda cloud index
+  - path: 'anaconda/cloud/(.*\.repodata.json(.bz2)?)'
+    upstream: "https://conda.anaconda.org/$1"
+    policy: "policy_ttl"
+  # Anaconda cloud packages
+  - path: "anaconda/cloud/"
+    upstream: "https://conda.anaconda.org/"
+    policy: "policy_lru_anaconda"
 
 policies:
-  - name: policy_ttl_3
+  - name: policy_ttl
     type: TTL
-    path: ".cache-test/ttl"
+    path: "cache/ttl"
     timeout: 3
-  - name: policy_lru_1k
+  - name: policy_lru
     type: LRU
-    size: 1024
-    path: ".cache-test/lru"
+    size: 1073741824
+    path: "cache/lru"
   - name: policy_lru_anaconda
     type: LRU
-    size: 1024
-    path: ".cache-test/lru_anaconda"
+    size: 1073741824
+    path: "cache/lru"
+  - name: policy_ubuntu
+    type: LRU
+    size: 0x2000000 # 32M
+    path: cache/ubuntu

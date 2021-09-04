@@ -9,7 +9,7 @@ mod util;
 
 use crate::task::TaskManager;
 
-use metrics::increment_counter;
+// use metrics::increment_counter;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -109,27 +109,7 @@ mod filters {
             );
         });
 
-        pypi_index()
-            .or(pypi_packages())
-            .or(anaconda_all())
-            .or(fallback())
-            .with(log)
-    }
-
-    /// GET /pypi/web/simple/:string
-    fn pypi_index() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path!("pypi" / "simple" / String).and_then(handlers::get_pypi_index)
-    }
-
-    /// GET /pypi/package/:string/:string/:string/:string
-    fn pypi_packages() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path!("pypi" / "packages" / String / String / String / String)
-            .and_then(handlers::get_pypi_pkg)
-    }
-
-    /// GET /anaconda/:repo/:arch/:filename
-    fn anaconda_all() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path!("anaconda" / String / String / String).and_then(handlers::get_anaconda)
+        fallback().with(log)
     }
 
     /// fallback handler, matches all paths
@@ -144,88 +124,25 @@ mod handlers {
     use super::*;
     use crate::task::Task;
     use std::result::Result;
-    use warp::{Rejection, Reply};
-
-    pub async fn get_pypi_index(path: String) -> Result<impl warp::Reply, Rejection> {
-        increment_counter!(metric::COUNTER_PYPI_INDEX_REQUESTS);
-        let tw = Task::PypiIndexTask { pkg_name: path };
-        let tm = TASK_MANAGER.read().await;
-        match tm.resolve_task(&tw).await {
-            Ok(data) => {
-                increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_SUCCESS);
-                let mut warp_resp: warp::reply::Response = data.into_response();
-                warp_resp
-                    .headers_mut()
-                    .insert("content-type", "text/html".parse().unwrap());
-                Ok(warp_resp)
-            }
-            Err(_) => {
-                increment_counter!(metric::COUNTER_PYPI_INDEX_REQ_FAILURE);
-                Err(warp::reject())
-            }
-        }
-    }
-
-    pub async fn get_pypi_pkg(
-        seg0: String,
-        seg1: String,
-        seg2: String,
-        seg3: String,
-    ) -> Result<impl warp::Reply, Rejection> {
-        increment_counter!(metric::COUNTER_PYPI_PKGS_REQ);
-        let fullpath = format!("{}/{}/{}/{}", seg0, seg1, seg2, seg3);
-        let t = Task::PypiPackagesTask { pkg_path: fullpath };
-        let tm = TASK_MANAGER.read().await;
-        match tm.resolve_task(&t).await {
-            Ok(data) => Ok(data),
-            Err(e) => {
-                error!("{}", e);
-                Err(warp::reject())
-            }
-        }
-    }
-
-    pub async fn get_anaconda(
-        channel: String,
-        arch: String,
-        filename: String,
-    ) -> Result<impl warp::Reply, Rejection> {
-        increment_counter!(metric::COUNTER_ANACONDA_REQ);
-        let tm = TASK_MANAGER.read().await;
-        let cache_key = format!("{}/{}/{}", channel, arch, filename);
-        let t;
-        if filename.ends_with(".json") {
-            t = Task::AnacondaIndexTask { path: cache_key };
-        } else {
-            t = Task::AnacondaPackagesTask { path: cache_key };
-        }
-        match tm.resolve_task(&t).await {
-            Ok(data) => Ok(data),
-            Err(e) => {
-                error!("{}", e);
-                Err(warp::reject())
-            }
-        }
-    }
+    use warp::Rejection;
 
     pub async fn fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
         // Dynamically dispatch tasks defined in config file
         let tm = TASK_MANAGER.read().await.clone();
         let config = &tm.config;
+        // TODO: Performance can be optimized
         for (idx, rule) in config.rules.iter().enumerate() {
             let upstream = rule.upstream.clone();
-            if let Some(rule_regex) = &rule.path {
-                let re = Regex::new(rule_regex).unwrap();
-                if re.is_match(&path) {
-                    trace!("captured by rule #{}: {}", idx, rule_regex);
-                    let replaced = re.replace_all(&path, &upstream);
-                    let t = Task::Others {
-                        rule_id: idx,
-                        url: String::from(replaced),
-                    };
-                    if let Ok(data) = tm.resolve_task(&t).await {
-                        return Ok(data);
-                    }
+            let re = Regex::new(&rule.path).unwrap();
+            if re.is_match(&path) {
+                trace!("captured by rule #{}: {}", idx, &rule.path);
+                let replaced = re.replace_all(&path, &upstream);
+                let t = Task::Others {
+                    rule_id: idx,
+                    url: String::from(replaced),
+                };
+                if let Ok(data) = tm.resolve_task(&t).await {
+                    return Ok(data);
                 }
             }
         }
@@ -242,7 +159,6 @@ mod test {
     use warp::Filter;
 
     async fn setup() {
-        println!("setup!");
         TASK_MANAGER.write().await.refresh_config(&get_settings());
     }
 
