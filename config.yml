@@ -23,7 +23,7 @@ rules:
     policy: "policy_lru"
 
   # Anaconda index [main]
-  - path: 'anaconda/pkgs/main/(.*\.repodata.json(.bz2)?)'
+  - path: 'anaconda/pkgs/main/(.*repodata.json(.bz2)?)'
     upstream: "https://repo.anaconda.com/pkgs/main/$1"
     policy: "policy_ttl_60"
   # Anaconda packages [main]
@@ -32,7 +32,7 @@ rules:
     policy: "policy_lru_anaconda"
 
   # Anaconda cloud index
-  - path: 'anaconda/cloud/(.*\.repodata.json(.bz2)?)'
+  - path: 'anaconda/cloud/(.*repodata.json(.bz2)?)'
     upstream: "https://conda.anaconda.org/$1"
     policy: "policy_ttl_60"
   # Anaconda cloud packages
@@ -60,5 +60,5 @@ policies:
     path: "cache/lru"
   - name: policy_ubuntu
     type: LRU
-    size: 0x2000000 # 32M
+    size: 32 MiB
     path: cache/ubuntu

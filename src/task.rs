@@ -228,7 +228,7 @@ impl TaskManager {
                     PolicyType::Lru => {
                         return Ok(Arc::new(LruRedisCache::new(
                             p.path.as_ref().unwrap(),
-                            p.size.unwrap_or(0),
+                            p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
                             redis_client.unwrap(),
                             &format!("lru_rule_{}", idx),
                         )));
@@ -255,11 +255,13 @@ impl TaskManager {
     }
 
     async fn taskset_add(&self, t: Task) {
+        println!("### TASK + [{}] {:?}", self.task_set.read().await.len(), &t);
         self.task_set.write().await.insert(t);
     }
 
     async fn taskset_remove(task_set: Arc<RwLock<HashSet<Task>>>, t: &Task) {
         task_set.write().await.remove(t);
+        println!("### TASK - [{}] {:?}", task_set.read().await.len(), &t);
     }
 
     async fn taskset_len(task_set: Arc<RwLock<HashSet<Task>>>) -> usize {

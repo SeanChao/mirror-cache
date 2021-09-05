@@ -33,7 +33,7 @@ pub struct Policy {
     #[serde(rename = "type")]
     pub typ: PolicyType,
     pub timeout: Option<u64>,
-    pub size: Option<u64>,
+    pub size: Option<String>,
     pub path: Option<String>, // cache path
 }
 

@@ -8,6 +8,8 @@
 
 A reverse proxy supporting multiple cache policies, customized rules, configuration hot reloading. For mirror sites and also personal users!
 
+[docs](docs/README.md) | [demo server](https://mirror.seanchao.xyz)
+
 ## Features
 
 - Cache your dependencies on limited disk space with LRU/TTL cache policies
@@ -28,7 +30,12 @@ cargo run
 Try it out:
 
 ```sh
-pip install -i http://localhost:9000 django
-```
+pip install -i http://localhost:9000 requests
 
-See [docs](docs/README.md) for detailed documentation.
+conda install -c http://localhost:9000 requests
+conda config --set custom_channels.pytorch http://localhost:9000/anaconda/cloud/ && conda install -c pytorch -y --download-only -v torchtext
+
+# Ubuntu
+# In /etc/apt/sources.list: change links like http://xxx.ubuntu.com/ubuntu into http://localhost:9000/ubuntu
+apt-get update
+```

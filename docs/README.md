@@ -2,7 +2,7 @@
 
 ## Configurations
 
-[example](config-example.md).
+The example [configuration file](../config.yml).
 
 ### How to configure
 
@@ -10,6 +10,10 @@
 See [config-rs](https://github.com/mehcode/config-rs) for supported formats.
 
 Exporting environment variables can override settings in the config file. All environment variables should be prefixed with `APP_`, Eg: `export APP_PORT=2333` overrides the `port` field to `2333`.
+
+#### Data type
+
+The type of `size` in the config file is string. E.g: `1000` (B), `42 KB`, `2.33 MB`, `666 GiB`.
 
 #### Common Options
 

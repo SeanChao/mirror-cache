@@ -49,6 +49,7 @@ async fn main() {
     log_builder
         .filter_module("hyper::proto", log::LevelFilter::Error) // hide excessive logs
         .filter_module("tracing::span", log::LevelFilter::Error)
+        .filter_module("tokio_util::codec", log::LevelFilter::Error)
         .filter_level(app_settings.get_log_level())
         .init();
 
@@ -136,7 +137,7 @@ mod handlers {
             let upstream = rule.upstream.clone();
             let re = Regex::new(&rule.path).unwrap();
             if re.is_match(&path) {
-                trace!("captured by rule #{}: {}", idx, &rule.path);
+                trace!("matched by rule #{}: {}", idx, &rule.path);
                 let replaced = re.replace_all(&path, &upstream);
                 let task = Task::Others {
                     rule_id: idx,
@@ -193,6 +194,7 @@ mod test {
         let resp_bytes = resp.body().to_vec();
         let resp_text = std::str::from_utf8(&resp_bytes).unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("content-type").unwrap().to_str().unwrap().contains("text/html"));
         // webpage fetched successfully
         assert!(resp_text.contains(&format!("Links for {}", pkg_name)));
         // target link is replaced successfully
