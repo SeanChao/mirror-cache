@@ -125,6 +125,7 @@ mod handlers {
     use crate::task::Task;
     use std::result::Result;
     use warp::Rejection;
+    use warp::Reply;
 
     pub async fn fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
         // Dynamically dispatch tasks defined in config file
@@ -137,12 +138,19 @@ mod handlers {
             if re.is_match(&path) {
                 trace!("captured by rule #{}: {}", idx, &rule.path);
                 let replaced = re.replace_all(&path, &upstream);
-                let t = Task::Others {
+                let task = Task::Others {
                     rule_id: idx,
                     url: String::from(replaced),
                 };
-                if let Ok(data) = tm.resolve_task(&t).await {
-                    return Ok(data);
+                if let Ok(data) = tm.resolve_task(&task).await {
+                    let mut resp = data.into_response();
+                    if let Some(options) = &rule.options {
+                        if let Some(content_type) = &options.content_type {
+                            resp = warp::reply::with_header(resp, "content-type", content_type)
+                                .into_response();
+                        }
+                    }
+                    return Ok(resp);
                 }
             }
         }

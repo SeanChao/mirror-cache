@@ -26,7 +26,6 @@ pub enum TaskResponse {
     StringResponse(String),
     BytesResponse(Bytes),
     StreamResponse(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>),
-    // RawResponse(impl warp::Reply)
     Redirect(warp::reply::WithHeader<warp::http::StatusCode>),
 }
 
@@ -68,7 +67,9 @@ impl Task {
         match &self {
             Task::Others { url, .. } => url
                 .replace("http://", "http/")
-                .replace("https://", "https/"),
+                .replace("https://", "https/")
+                .trim_end_matches("/")
+                .to_string(),
         }
     }
 }

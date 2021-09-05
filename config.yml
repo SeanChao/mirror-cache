@@ -1,7 +1,7 @@
 port: 9000
 url: http://localhost:9000 # url of this app
 # log level: error / warn / info / debug / trace, default level is info
-log_level: trace
+log_level: info
 
 redis:
   url: redis://localhost
@@ -14,8 +14,11 @@ rules:
       - from: "https://files.pythonhosted.org/"
         to: "http://localhost:9000/pypi/"
     policy: "policy_ttl_60"
+    options:
+      content_type: "text/html"
   # PyPI packages
   - path: "pypi/packages/"
+    size_limit: 1 GB
     upstream: "https://files.pythonhosted.org/packages/"
     policy: "policy_lru"
 

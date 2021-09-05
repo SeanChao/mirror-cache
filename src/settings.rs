@@ -24,6 +24,7 @@ pub struct Rule {
     pub upstream: String,
     pub size_limit: Option<String>,
     pub rewrite: Option<Vec<Rewrite>>,
+    pub options: Option<Options>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -42,12 +43,11 @@ pub struct Rewrite {
     pub to: String,
 }
 
-#[derive(Debug, Deserialize, Copy, Clone)]
-pub enum PathType {
-    #[serde(rename = "prefix")]
-    Prefix,
-    #[serde(rename = "regex")]
-    Regex,
+/// Options for rules
+#[derive(Debug, Deserialize, Clone)]
+pub struct Options {
+    /// Override the content-type in the HTTP response header
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Copy, Clone)]

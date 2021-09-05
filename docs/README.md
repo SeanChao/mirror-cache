@@ -2,7 +2,7 @@
 
 ## Configurations
 
-An [example](../config.yml).
+[example](config-example.md).
 
 ### How to configure
 
@@ -23,27 +23,16 @@ Exporting environment variables can override settings in the config file. All en
 
 `url` is the Redis connection string.
 
-#### Builtin
-
-In the builtin section, you can customize settings of the builtin rules.
-
-We currently support the following mirror rules:
-
-- `pypi_index`: PyPI index page
-- `pypi_packages`: PyPI packages
-- `anaconda_index`: Anaconda index page (repodata.json)
-- `anaconda_packages`: Anaconda packages
-
-You may configure the policy and upstream for these rules.
-
 #### Rules
 
 Rules are an array of customized proxy rules.
 
-- path: the path to match, supports regular expression
-- policy: the name of policy to use, defined in `policies`
-- upstream: the upstream of the path, the reverse proxy will try to fetch targets from the upstream
-- size_limit: The maximum size of package that the program would fetch and cache. If the size of the package exceeds the number, the response will be a `302 Found` to the upstream url. Use `0` for unlimited size. The default value is `0`.
+- `path`: the path to match, supports regular expression. If the given string is a plain string, a simple prefix removal and reverse proxying is performed: the target url is the content after `path` appended to the `upstream`.
+- `policy`: the name of policy to use, defined in `policies`
+- `upstream`: the upstream of the path, the reverse proxy will try to fetch targets from the upstream
+- `size_limit`: *Optional* The maximum size of package that the program would fetch and cache. If the size of the package exceeds the number, the response will be a `302 Found` to the upstream url. Use `0` for unlimited size. The default value is `0`.
+- `options`: *Optional* Additional options for the rule.
+  - `content-type`: Override the content-type of the response. Some endpoints like PyPI index requires this header.
 
 #### Policies
 
@@ -70,6 +59,9 @@ In config: `type: LRU`
 If the size of all cached files exceeds specied limit, the program will evict a cache entry base on **least recent used (LRU)** policy.
 Every time a file is accessed, its access time is updated to a newer one. Those cache entries with lease recent access time are evicted until we have enough space for the new cache entry.
 
+Avaliable options in `policy`:
+- `size`: the maximum size of the space usage.
+
 ### TTL Redis Cache
 
 In config: `type: TTL`
@@ -83,3 +75,6 @@ A cache hit happens if the program can `GET` cache key from redis. Otherwise a c
 A cache entry `put` is composed of two redis operations: `SET` the cache key and `EXPIRE` it.
 
 If a key expiration notification is published while the program is not running, some cache data may not be removed from storage. You may need to manually remove them based on the TTL you configured.
+
+Avaliable options in `policy`:
+- timeout: The TTL in seconds.
