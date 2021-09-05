@@ -13,10 +13,7 @@ test:
 	docker stop redis_test
 
 dev:
-	cargo watch -d 2 -i cache -x run
-
-dev_test:
-	cargo watch -d 1 -i cache -s "docker run --name redis_test -d -p 3001:6379 --rm redis && cargo test; docker stop redis_test"
+	cargo watch -d 2 -w src -w Cargo.toml -x run
 
 dev_clear:
 	rm -rf cache/* 

@@ -2,11 +2,13 @@
 
 <div align="center">
   <a href="https://github.com/SeanChao/mirror-cache/actions/workflows/ci.yml">
-    <img src="https://github.com/SeanChao/mirror-cache/actions/workflows/ci.yml/badge.svg" alt="GitHub Action CI status"></img>
+    <img src="https://github.com/SeanChao/mirror-cache/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI status"></img>
   </a>
 </div>
 
 A reverse proxy supporting multiple cache policies, customized rules, configuration hot reloading. For mirror sites and also personal users!
+
+[docs](docs/README.md) | [demo server](https://mirror.seanchao.xyz)
 
 ## Features
 
@@ -28,11 +30,12 @@ cargo run
 Try it out:
 
 ```sh
-pip install -i http://localhost:9000 django
+pip install -i http://localhost:9000 requests
+
+conda install -c http://localhost:9000 requests
+conda config --set custom_channels.pytorch http://localhost:9000/anaconda/cloud/ && conda install -c pytorch -y --download-only -v torchtext
+
+# Ubuntu
+# In /etc/apt/sources.list: change links like http://xxx.ubuntu.com/ubuntu into http://localhost:9000/ubuntu
+apt-get update
 ```
-
-## More
-
-We currently provide built-in support for [PyPI](https://pypi.org/) and [Anaconda](https://anaconda.com). You may add other regex-based rules dynamically.
-
-See [docs](docs/README.md) for detailed documentation.

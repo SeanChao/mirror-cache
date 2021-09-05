@@ -14,13 +14,16 @@ rules:
       - from: "https://files.pythonhosted.org/"
         to: "http://localhost:9001/pypi/"
     policy: "policy_ttl"
+    options:
+      content_type: "text/html"
+
   # PyPI packages
   - path: "pypi/packages/"
     upstream: "https://files.pythonhosted.org/packages/"
     policy: "policy_lru"
 
   # Anaconda index [main]
-  - path: 'anaconda/pkgs/main/(.*\.repodata.json(.bz2)?)'
+  - path: 'anaconda/pkgs/main/(.*repodata.json(.bz2)?)'
     upstream: "https://repo.anaconda.com/pkgs/main/$1"
     policy: "policy_ttl"
   # Anaconda packages [main]
@@ -29,7 +32,7 @@ rules:
     policy: "policy_lru_anaconda"
 
   # Anaconda cloud index
-  - path: 'anaconda/cloud/(.*\.repodata.json(.bz2)?)'
+  - path: 'anaconda/cloud/(.*repodata.json(.bz2)?)'
     upstream: "https://conda.anaconda.org/$1"
     policy: "policy_ttl"
   # Anaconda cloud packages

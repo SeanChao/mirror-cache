@@ -49,6 +49,7 @@ async fn main() {
     log_builder
         .filter_module("hyper::proto", log::LevelFilter::Error) // hide excessive logs
         .filter_module("tracing::span", log::LevelFilter::Error)
+        .filter_module("tokio_util::codec", log::LevelFilter::Error)
         .filter_level(app_settings.get_log_level())
         .init();
 
@@ -125,6 +126,7 @@ mod handlers {
     use crate::task::Task;
     use std::result::Result;
     use warp::Rejection;
+    use warp::Reply;
 
     pub async fn fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
         // Dynamically dispatch tasks defined in config file
@@ -135,14 +137,21 @@ mod handlers {
             let upstream = rule.upstream.clone();
             let re = Regex::new(&rule.path).unwrap();
             if re.is_match(&path) {
-                trace!("captured by rule #{}: {}", idx, &rule.path);
+                trace!("matched by rule #{}: {}", idx, &rule.path);
                 let replaced = re.replace_all(&path, &upstream);
-                let t = Task::Others {
+                let task = Task::Others {
                     rule_id: idx,
                     url: String::from(replaced),
                 };
-                if let Ok(data) = tm.resolve_task(&t).await {
-                    return Ok(data);
+                if let Ok(data) = tm.resolve_task(&task).await {
+                    let mut resp = data.into_response();
+                    if let Some(options) = &rule.options {
+                        if let Some(content_type) = &options.content_type {
+                            resp = warp::reply::with_header(resp, "content-type", content_type)
+                                .into_response();
+                        }
+                    }
+                    return Ok(resp);
                 }
             }
         }
@@ -185,6 +194,13 @@ mod test {
         let resp_bytes = resp.body().to_vec();
         let resp_text = std::str::from_utf8(&resp_bytes).unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/html"));
         // webpage fetched successfully
         assert!(resp_text.contains(&format!("Links for {}", pkg_name)));
         // target link is replaced successfully
