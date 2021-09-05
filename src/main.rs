@@ -194,7 +194,13 @@ mod test {
         let resp_bytes = resp.body().to_vec();
         let resp_text = std::str::from_utf8(&resp_bytes).unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(resp.headers().get("content-type").unwrap().to_str().unwrap().contains("text/html"));
+        assert!(resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("text/html"));
         // webpage fetched successfully
         assert!(resp_text.contains(&format!("Links for {}", pkg_name)));
         // target link is replaced successfully
