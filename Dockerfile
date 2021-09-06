@@ -24,9 +24,10 @@ RUN cargo build --release
 FROM debian:buster-slim
 RUN apt-get update
 RUN apt-get install -y openssl ca-certificates
-RUN ca-certificates-update
+RUN update-ca-certificates
 
 # Copy from the previous build
 COPY --from=build /mirror-cache/target/release/mirror-cache /app/mirror-cache
+WORKDIR /app/
 # Run the binary
 CMD ["/app/mirror-cache"]
