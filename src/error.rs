@@ -14,8 +14,8 @@ pub enum Error {
     RedisClientError(redis::RedisError),
     #[error("outbound request failed: {0}")]
     RequestError(reqwest::Error),
-    #[error("upstream request failed: {0}")]
-    UpstreamError(String),
+    #[error("upstream request is not successful: {0:?}")]
+    UpstreamRequestError(reqwest::Response),
     #[error("{0}")]
     ConfigDeserializeError(config::ConfigError),
     #[error("invalid configuration: {0}")]

@@ -133,9 +133,7 @@ impl TaskManager {
         match resp {
             Ok(res) => {
                 if !res.status().is_success() {
-                    return Err(Error::UpstreamError(
-                        res.status().canonical_reason().unwrap_or("unknown").into(),
-                    ));
+                    return Err(Error::UpstreamRequestError(res));
                 }
                 // if the response is too large, respond users with a redirect to upstream
                 if let Some(content_length) = res.content_length() {

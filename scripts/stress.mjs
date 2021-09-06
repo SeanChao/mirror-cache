@@ -13,7 +13,7 @@ try {
 	// begin tests
 	const base = ["torch", "tensorflow"]
 	let targets = []
-	for (let i = 0; i < 5; i++) {
+	for (let i = 0; i < 3; i++) {
 		targets = targets.concat(base)
 	}
 	console.log(targets)

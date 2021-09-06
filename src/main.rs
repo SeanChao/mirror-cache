@@ -131,6 +131,7 @@ mod filters {
 
 mod handlers {
     use super::*;
+    use crate::error::Error;
     use crate::task::Task;
     use std::result::Result;
     use warp::Rejection;
@@ -168,7 +169,16 @@ mod handlers {
                 }
                 return Ok(resp);
             }
-            Err(e) => Err(warp::reject::custom(e)),
+            Err(e) => match e {
+                Error::UpstreamRequestError(res) => {
+                    let resp = warp::http::Response::builder()
+                        .status(res.status())
+                        .body(res.bytes().await.unwrap().into())
+                        .unwrap();
+                    Ok(resp)
+                }
+                _ => Err(warp::reject::custom(e)),
+            },
         }
     }
 }
