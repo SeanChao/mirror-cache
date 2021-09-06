@@ -13,9 +13,8 @@ use crate::task::TaskManager;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use std::path::Path;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[macro_use]
@@ -25,11 +24,16 @@ extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
-pub type SharedTaskManager = Arc<TaskManager>;
 pub type LockedSharedTaskManager = RwLock<TaskManager>;
-pub type FuckTM = Arc<std::sync::RwLock<TaskManager>>;
 
 lazy_static::lazy_static! {
+    /// A regular expression set of all specified rule paths.
+    static ref RE_SET: RwLock<RegexSet> = {
+        let app_settings = settings::Settings::new().unwrap();
+        let rules: Vec<String> = app_settings.rules.iter().map(|rule| rule.path.clone()).collect();
+        RwLock::new(RegexSet::new(&rules).unwrap())
+    };
+    /// Global task manager.
     static ref TASK_MANAGER: LockedSharedTaskManager = {
         let app_settings = settings::Settings::new().unwrap();
         let mut tm = TaskManager::new(app_settings.clone());
@@ -79,7 +83,11 @@ async fn main() {
                 // update config:
                 futures::executor::block_on(async {
                     match settings::Settings::new() {
-                        Ok(settings) => {TASK_MANAGER.write().await.refresh_config(&settings);
+                        Ok(settings) => {
+                            TASK_MANAGER.write().await.refresh_config(&settings);
+                            let rules: Vec<String> = settings.rules.iter().map(|rule| rule.path.clone()).collect();
+                            let mut new_re_set = RE_SET.write().await;
+                            *new_re_set = RegexSet::new(&rules).unwrap();
                             info!("config updated");
                         },
                         Err(e) => {
@@ -132,30 +140,36 @@ mod handlers {
         // Dynamically dispatch tasks defined in config file
         let tm = TASK_MANAGER.read().await.clone();
         let config = &tm.config;
-        // TODO: Performance can be optimized
-        for (idx, rule) in config.rules.iter().enumerate() {
-            let upstream = rule.upstream.clone();
-            let re = Regex::new(&rule.path).unwrap();
-            if re.is_match(&path) {
-                trace!("matched by rule #{}: {}", idx, &rule.path);
-                let replaced = re.replace_all(&path, &upstream);
-                let task = Task::Others {
-                    rule_id: idx,
-                    url: String::from(replaced),
-                };
-                if let Ok(data) = tm.resolve_task(&task).await {
-                    let mut resp = data.into_response();
-                    if let Some(options) = &rule.options {
-                        if let Some(content_type) = &options.content_type {
-                            resp = warp::reply::with_header(resp, "content-type", content_type)
-                                .into_response();
-                        }
-                    }
-                    return Ok(resp);
-                }
-            }
+        let rules_regex_set = RE_SET.read().await;
+        let matched_indices: Vec<usize> = rules_regex_set.matches(&path).into_iter().collect();
+        if matched_indices.len() == 0 {
+            // No matching rule
+            return Err(warp::reject());
         }
-        Err(warp::reject())
+        let idx = *matched_indices.first().unwrap();
+        let rule = config.rules.get(idx).unwrap();
+
+        let upstream = rule.upstream.clone();
+        let re = Regex::new(&rule.path).unwrap();
+        trace!("matched by rule #{}: {}", idx, &rule.path);
+        let replaced = re.replace_all(&path, &upstream);
+        let task = Task::Others {
+            rule_id: idx,
+            url: String::from(replaced),
+        };
+        match tm.resolve_task(&task).await {
+            Ok(data) => {
+                let mut resp = data.into_response();
+                if let Some(options) = &rule.options {
+                    if let Some(content_type) = &options.content_type {
+                        resp = warp::reply::with_header(resp, "content-type", content_type)
+                            .into_response();
+                    }
+                }
+                return Ok(resp);
+            }
+            Err(e) => Err(warp::reject::custom(e)),
+        }
     }
 }
 

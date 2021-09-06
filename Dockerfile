@@ -17,14 +17,14 @@ RUN rm src/*.rs
 COPY ./src ./src
 
 # Build for release.
-RUN ls -la ./target/release/deps
 RUN rm ./target/release/deps/mirror_cache*
 RUN cargo build --release
 
 # The final base image
 FROM debian:buster-slim
 RUN apt-get update
-RUN apt-get install -y openssl
+RUN apt-get install -y openssl ca-certificates
+RUN ca-certificates-update
 
 # Copy from the previous build
 COPY --from=build /mirror-cache/target/release/mirror-cache /app/mirror-cache
