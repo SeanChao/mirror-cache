@@ -19,6 +19,8 @@ The type of `size` in the config file is string. E.g: `1000` (B), `42 KB`, `2.33
 
 `port` specifies the port number to listen on.
 
+`metrics_port`: specifies the port of Prometheus metrics server.
+
 `url` specifies the base URL for the application. It is used in upstream rewriting for some upstream like PyPI index pages.
 
 `log_level` specifies the log level. Allowed values are `trace`, `debug`, `info`, `warn`, `error`.
@@ -82,3 +84,7 @@ If a key expiration notification is published while the program is not running, 
 
 Avaliable options in `policy`:
 - timeout: The TTL in seconds.
+
+## Metrics
+
+The prometheus metrics server is exposed on the specified port in config. You may launch a prometheus client and configure the target with the port.

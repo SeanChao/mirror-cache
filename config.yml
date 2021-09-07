@@ -1,5 +1,5 @@
 port: 9000
-url: http://localhost:9000 # url of this app
+metrics_port: 9001
 # log level: error / warn / info / debug / trace, default level is info
 log_level: info
 
@@ -8,8 +8,9 @@ redis:
 
 rules:
   # PyPI index
-  - path: "pypi/simple/"
-    upstream: "https://pypi.org/simple/"
+  - name: PyPI index
+    path: "pypi/simple"
+    upstream: "https://pypi.org/simple"
     rewrite:
       - from: "https://files.pythonhosted.org/"
         to: "http://localhost:9000/pypi/"
@@ -17,7 +18,8 @@ rules:
     options:
       content_type: "text/html"
   # PyPI packages
-  - path: "pypi/packages/"
+  - name: PyPI packages
+    path: "pypi/packages/"
     size_limit: 1 GB
     upstream: "https://files.pythonhosted.org/packages/"
     policy: "policy_lru"

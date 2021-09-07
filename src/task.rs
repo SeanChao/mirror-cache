@@ -1,4 +1,4 @@
-use crate::cache::{CacheData, CachePolicy, LruRedisCache, NoCache, TtlRedisCache};
+use crate::cache::{CacheData, CacheHitMiss, CachePolicy, LruRedisCache, NoCache, TtlRedisCache};
 use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
@@ -105,7 +105,7 @@ impl TaskManager {
         }
     }
 
-    pub async fn resolve_task(&self, task: &Task) -> Result<TaskResponse> {
+    pub async fn resolve_task(&self, task: &Task) -> (Result<TaskResponse>, CacheHitMiss) {
         // try get from cache
         let mut cache_result = None;
         let key = task.to_key();
@@ -118,8 +118,7 @@ impl TaskManager {
         };
         if let Some(data) = cache_result {
             info!("[Request] [HIT] {:?}", &task);
-            increment_counter!(metric::COUNTER_CACHE_HIT);
-            return Ok(data.into());
+            return (Ok(data.into()), CacheHitMiss::Hit);
         }
         increment_counter!(metric::COUNTER_CACHE_MISS);
         // cache miss
@@ -133,17 +132,20 @@ impl TaskManager {
         match resp {
             Ok(res) => {
                 if !res.status().is_success() {
-                    return Err(Error::UpstreamRequestError(res));
+                    return (Err(Error::UpstreamRequestError(res)), CacheHitMiss::Miss);
                 }
                 // if the response is too large, respond users with a redirect to upstream
                 if let Some(content_length) = res.content_length() {
                     let size_limit = self.get_task_size_limit(&task);
                     if size_limit != 0 && size_limit < content_length as usize {
-                        return Ok(TaskResponse::Redirect(warp::reply::with_header(
-                            warp::http::StatusCode::FOUND,
-                            "Location",
-                            remote_url,
-                        )));
+                        return (
+                            Ok(TaskResponse::Redirect(warp::reply::with_header(
+                                warp::http::StatusCode::FOUND,
+                                "Location",
+                                remote_url,
+                            ))),
+                            CacheHitMiss::Miss,
+                        );
                     }
                 }
                 // dispatch async cache task
@@ -153,19 +155,22 @@ impl TaskManager {
                         if let Some(rewrite_rules) = self.rewrite_map.get(rule_id) {
                             let text = res.text().await.unwrap();
                             let content = Self::rewrite_upstream(text, &rewrite_rules);
-                            return Ok(content.into());
+                            return (Ok(content.into()), CacheHitMiss::Miss);
                         } else {
-                            Ok(TaskResponse::StreamResponse(Box::pin(
-                                res.bytes_stream()
-                                    .map(move |x| x.map_err(|e| Error::RequestError(e))),
-                            )))
+                            (
+                                Ok(TaskResponse::StreamResponse(Box::pin(
+                                    res.bytes_stream()
+                                        .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                                ))),
+                                CacheHitMiss::Miss,
+                            )
                         }
                     }
                 }
             }
             Err(e) => {
                 error!("[Request] {:?} failed to fetch upstream: {}", &task, e);
-                Err(e)
+                (Err(e), CacheHitMiss::Miss)
             }
         }
     }

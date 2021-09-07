@@ -15,6 +15,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::vec::Vec;
 
+pub enum CacheHitMiss {
+    Hit,
+    Miss,
+}
+
 pub enum CacheData {
     TextData(String),
     BytesData(Bytes),

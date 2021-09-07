@@ -9,11 +9,13 @@ mod util;
 
 use crate::task::TaskManager;
 
-// use metrics::increment_counter;
+use cache::CacheHitMiss;
+use metrics::{increment_counter, register_counter};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::{Regex, RegexSet};
+use settings::{rule_label, Rule};
 use std::path::Path;
 use tokio::sync::RwLock;
 
@@ -27,11 +29,15 @@ extern crate log;
 pub type LockedSharedTaskManager = RwLock<TaskManager>;
 
 lazy_static::lazy_static! {
-    /// A regular expression set of all specified rule paths.
-    static ref RE_SET: RwLock<RegexSet> = {
+    /// A regular expression set of all specified rule paths and a list of Regex
+    /// As suggest in regex documentation of `RegexSet`:
+    /// Other features like finding the location of successive matches or their
+    /// sub-captures aren’t supported. If you need this functionality, the
+    /// recommended approach is to compile each regex in the set independently
+    /// and selectively match them based on which regexes in the set matched.
+    static ref RE_SET_LIST: RwLock<(RegexSet, Vec<Regex>)> = {
         let app_settings = settings::Settings::new().unwrap();
-        let rules: Vec<String> = app_settings.rules.iter().map(|rule| rule.path.clone()).collect();
-        RwLock::new(RegexSet::new(&rules).unwrap())
+        RwLock::new(create_re_set_list(&app_settings.rules))
     };
     /// Global task manager.
     static ref TASK_MANAGER: LockedSharedTaskManager = {
@@ -46,6 +52,7 @@ lazy_static::lazy_static! {
 async fn main() {
     let app_settings = settings::Settings::new().unwrap();
     let port = app_settings.port;
+    let metrics_port = app_settings.metrics_port;
     let api = filters::root();
 
     // initialize the logger
@@ -64,10 +71,11 @@ async fn main() {
             MetricKindMask::COUNTER | MetricKindMask::HISTOGRAM,
             Some(std::time::Duration::from_secs(10)),
         )
-        .listen_address(([127, 0, 0, 1], port + 1))
+        .listen_address(([127, 0, 0, 1], metrics_port))
         .install()
         .expect("failed to install Prometheus recorder");
     metric::register_counters();
+    register_rules_metrics(&app_settings.rules);
 
     // Watcher::
     // We listen to file changes by giving Notify
@@ -77,31 +85,61 @@ async fn main() {
         // we need to move the ownership of the config inside the function
         // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
         RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
-            let event = result.unwrap();
-            if event.kind.is_modify() {
-                util::sleep_ms(2000);
-                // update config:
-                futures::executor::block_on(async {
-                    match settings::Settings::new() {
-                        Ok(settings) => {
-                            TASK_MANAGER.write().await.refresh_config(&settings);
-                            let rules: Vec<String> = settings.rules.iter().map(|rule| rule.path.clone()).collect();
-                            let mut new_re_set = RE_SET.write().await;
-                            *new_re_set = RegexSet::new(&rules).unwrap();
-                            info!("config updated");
-                        },
-                        Err(e) => {
-                            error!("Failed to load config: {}. Use the original config.", e);
-                        }
-                    }
-                })
-            }
+            file_watch_handler(result)
         }).unwrap();
     watcher
         .watch(Path::new("config.yml"), RecursiveMode::Recursive)
         .unwrap();
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
+}
+
+fn file_watch_handler(result: std::result::Result<Event, notify::Error>) {
+    let event = result.unwrap();
+    if event.kind.is_modify() {
+        util::sleep_ms(2000);
+        // update config:
+        futures::executor::block_on(async {
+            match settings::Settings::new() {
+                Ok(settings) => {
+                    TASK_MANAGER.write().await.refresh_config(&settings);
+                    let mut re_set_list = RE_SET_LIST.write().await;
+                    *re_set_list = create_re_set_list(&settings.rules);
+                    register_rules_metrics(&settings.rules);
+                    info!("config updated");
+                }
+                Err(e) => {
+                    error!("Failed to load config: {}. Use the original config.", e);
+                }
+            }
+        })
+    }
+}
+
+fn create_re_set_list(rules: &Vec<Rule>) -> (RegexSet, Vec<Regex>) {
+    let rules_strings: Vec<String> = rules.iter().map(|rule| rule.path.clone()).collect();
+    let set = RegexSet::new(&rules_strings).unwrap();
+    let list = rules
+        .iter()
+        .map(|rule| Regex::new(&rule.path).unwrap())
+        .collect();
+    (set, list)
+}
+
+/// Register metrics for each rule.
+/// - counter - cache hit
+/// - counter - cache miss
+/// - counter - incoming requests
+/// - counter - successful requests
+/// - counter - failed requests
+fn register_rules_metrics(rules: &Vec<Rule>) {
+    for rule in rules {
+        register_counter!(metric::COUNTER_CACHE_HIT, "Cache hit count", "rule" => rule_label(rule));
+        register_counter!(metric::COUNTER_CACHE_MISS, "Cache miss count", "rule" => rule_label(rule));
+        register_counter!(metric::COUNTER_REQ, "Incoming requests count", "rule" => rule_label(rule));
+        register_counter!(metric::COUNTER_REQ_SUCCESS, "Incoming requests count (success)", "rule" => rule_label(rule));
+        register_counter!(metric::COUNTER_REQ_FAILURE, "Incoming requests count (failure)", "rule" => rule_label(rule));
+    }
 }
 
 mod filters {
@@ -141,24 +179,34 @@ mod handlers {
         // Dynamically dispatch tasks defined in config file
         let tm = TASK_MANAGER.read().await.clone();
         let config = &tm.config;
-        let rules_regex_set = RE_SET.read().await;
-        let matched_indices: Vec<usize> = rules_regex_set.matches(&path).into_iter().collect();
+        let rules_regex_set_list = RE_SET_LIST.read().await;
+        let matched_indices: Vec<usize> =
+            rules_regex_set_list.0.matches(&path).into_iter().collect();
         if matched_indices.len() == 0 {
             // No matching rule
             return Err(warp::reject());
         }
         let idx = *matched_indices.first().unwrap();
+        let re = &rules_regex_set_list.1[idx];
         let rule = config.rules.get(idx).unwrap();
-
         let upstream = rule.upstream.clone();
-        let re = Regex::new(&rule.path).unwrap();
         trace!("matched by rule #{}: {}", idx, &rule.path);
+        increment_counter!(metric::COUNTER_REQ, "rule" => rule_label(rule));
         let replaced = re.replace_all(&path, &upstream);
         let task = Task::Others {
             rule_id: idx,
             url: String::from(replaced),
         };
-        match tm.resolve_task(&task).await {
+        let tm_resp = tm.resolve_task(&task).await;
+        match tm_resp.1 {
+            CacheHitMiss::Hit => {
+                increment_counter!(metric::COUNTER_CACHE_HIT, "rule" => rule_label(rule))
+            }
+            CacheHitMiss::Miss => {
+                increment_counter!(metric::COUNTER_CACHE_MISS, "rule" => rule_label(rule))
+            }
+        };
+        match tm_resp.0 {
             Ok(data) => {
                 let mut resp = data.into_response();
                 if let Some(options) = &rule.options {
@@ -167,18 +215,22 @@ mod handlers {
                             .into_response();
                     }
                 }
+                increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
                 return Ok(resp);
             }
-            Err(e) => match e {
-                Error::UpstreamRequestError(res) => {
-                    let resp = warp::http::Response::builder()
-                        .status(res.status())
-                        .body(res.bytes().await.unwrap().into())
-                        .unwrap();
-                    Ok(resp)
+            Err(e) => {
+                increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
+                match e {
+                    Error::UpstreamRequestError(res) => {
+                        let resp = warp::http::Response::builder()
+                            .status(res.status())
+                            .body(res.bytes().await.unwrap().into())
+                            .unwrap();
+                        Ok(resp)
+                    }
+                    _ => Err(warp::reject::custom(e)),
                 }
-                _ => Err(warp::reject::custom(e)),
-            },
+            }
         }
     }
 }
@@ -207,7 +259,6 @@ mod test {
     #[tokio::test]
     async fn get_pypi_index() {
         setup().await;
-        let app_url = get_settings().url.unwrap();
         let pkg_name = "hello-world";
         let api = get_filter_root();
         let resp = request()
@@ -228,6 +279,6 @@ mod test {
         // webpage fetched successfully
         assert!(resp_text.contains(&format!("Links for {}", pkg_name)));
         // target link is replaced successfully
-        assert!(resp_text.contains(&app_url));
+        assert!(resp_text.contains("http://localhost:9001/pypi"));
     }
 }

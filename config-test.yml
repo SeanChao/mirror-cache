@@ -1,6 +1,5 @@
 port: 9001
-debug: true
-url: http://localhost:9001
+metrics_port: 9001
 log_level: trace
 
 redis:
@@ -8,8 +7,8 @@ redis:
 
 rules:
   # PyPI index
-  - path: "pypi/simple/"
-    upstream: "https://pypi.org/simple/"
+  - path: "pypi/simple"
+    upstream: "https://pypi.org/simple"
     rewrite:
       - from: "https://files.pythonhosted.org/"
         to: "http://localhost:9001/pypi/"

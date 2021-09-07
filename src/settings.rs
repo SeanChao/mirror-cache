@@ -5,8 +5,8 @@ use config::{Config, Environment, File};
 #[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
     pub port: u16,
+    pub metrics_port: u16,
     redis: Redis,
-    pub url: Option<String>,
     pub log_level: String,
     pub rules: Vec<Rule>,
     pub policies: Vec<Policy>,
@@ -19,6 +19,7 @@ struct Redis {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Rule {
+    pub name: Option<String>,
     pub path: String,
     pub policy: String,
     pub upstream: String,
@@ -68,7 +69,16 @@ impl Settings {
         s.merge(File::with_name(filename))?;
         s.merge(Environment::with_prefix(env_prefix))?;
         match s.try_into() {
-            Ok(settings) => Ok(settings),
+            Ok(settings) => {
+                let mut settings: Settings = settings;
+                // name all unnamed rules
+                for (idx, rule) in settings.rules.iter_mut().enumerate() {
+                    if rule.name.is_none() {
+                        rule.name = Some(format!("rule_{}", idx));
+                    }
+                }
+                Ok(settings)
+            }
             Err(e) => Err(Error::ConfigDeserializeError(e)),
         }
     }
@@ -88,5 +98,36 @@ impl Settings {
             "trace" => log::LevelFilter::Trace,
             _ => log::LevelFilter::Info,
         }
+    }
+}
+
+pub fn rule_label(rule: &Rule) -> String {
+    rule.name.clone().unwrap_or("unnamed_rules".to_string())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    macro_rules! new_rule {
+        ($name: expr) => {
+            Rule {
+                name: $name,
+                path: "".into(),
+                policy: "".into(),
+                upstream: "".into(),
+                size_limit: None,
+                rewrite: None,
+                options: None,
+            }
+        };
+    }
+
+    #[test]
+    fn get_rule_label_test() {
+        let rule = new_rule!(Some("awesome".into()));
+        assert_eq!(rule_label(&rule), "awesome");
+        let rule = new_rule!(None);
+        assert_eq!(rule_label(&rule), "unnamed_rules");
     }
 }
