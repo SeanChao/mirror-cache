@@ -7,9 +7,8 @@ mod storage;
 mod task;
 mod util;
 
-use crate::task::TaskManager;
-
 use cache::CacheHitMiss;
+use clap::{App, Arg};
 use metrics::{increment_counter, register_counter};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
@@ -17,6 +16,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::{Regex, RegexSet};
 use settings::{rule_label, Rule};
 use std::path::Path;
+use task::TaskManager;
 use tokio::sync::RwLock;
 
 #[macro_use]
@@ -36,21 +36,34 @@ lazy_static::lazy_static! {
     /// recommended approach is to compile each regex in the set independently
     /// and selectively match them based on which regexes in the set matched.
     static ref RE_SET_LIST: RwLock<(RegexSet, Vec<Regex>)> = {
-        let app_settings = settings::Settings::new().unwrap();
-        RwLock::new(create_re_set_list(&app_settings.rules))
+        RwLock::new((RegexSet::empty(), vec![]))
     };
     /// Global task manager.
     static ref TASK_MANAGER: LockedSharedTaskManager = {
-        let app_settings = settings::Settings::new().unwrap();
-        let mut tm = TaskManager::new(app_settings.clone());
-        tm.refresh_config(&app_settings);
-        RwLock::new(tm)
+        RwLock::new(TaskManager::empty())
     };
 }
 
 #[tokio::main]
 async fn main() {
-    let app_settings = settings::Settings::new().unwrap();
+    let matches = App::new("mirror-cache")
+        .version("0.1.0")
+        .arg(
+            Arg::with_name("config")
+                .short("c")
+                .long("config")
+                .value_name("FILE")
+                .help("Sets a custom config file. Default config.yml")
+                .takes_value(true),
+        )
+        .get_matches();
+    println!("CLI args: {:?}", matches);
+    let config_filename = matches
+        .value_of("config")
+        .unwrap_or("config.yml")
+        .to_string();
+
+    let app_settings = settings::Settings::new(&config_filename).unwrap();
     let port = app_settings.port;
     let metrics_port = app_settings.metrics_port;
     let api = filters::root();
@@ -63,6 +76,16 @@ async fn main() {
         .filter_module("tokio_util::codec", log::LevelFilter::Error)
         .filter_level(app_settings.get_log_level())
         .init();
+
+    // initialize global static TASK_MANAGER and RE_SET_LIST
+    let mut tm = TaskManager::new(app_settings.clone());
+    tm.refresh_config(&app_settings);
+    {
+        let mut global_tm = TASK_MANAGER.write().await;
+        *global_tm = tm;
+        let mut global_re_set_list = RE_SET_LIST.write().await;
+        *global_re_set_list = create_re_set_list(&app_settings.rules);
+    }
 
     // init metrics
     let builder = PrometheusBuilder::new();
@@ -79,28 +102,30 @@ async fn main() {
 
     // Watcher::
     // We listen to file changes by giving Notify
-    // a function that will get called when events happen
+    // a function that will get called when events happen.
+    // To make sure that the config lives as long as the function
+    // we need to move the ownership of the config inside the function
+    // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
+    let config_filename_clone = config_filename.clone();
     let mut watcher =
-        // To make sure that the config lives as long as the function
-        // we need to move the ownership of the config inside the function
-        // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
         RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
-            file_watch_handler(result)
-        }).unwrap();
+            file_watch_handler(&config_filename_clone, result)
+        })
+        .unwrap();
     watcher
-        .watch(Path::new("config.yml"), RecursiveMode::Recursive)
+        .watch(Path::new(&config_filename), RecursiveMode::Recursive)
         .unwrap();
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
 
-fn file_watch_handler(result: std::result::Result<Event, notify::Error>) {
+fn file_watch_handler(config_filename: &str, result: std::result::Result<Event, notify::Error>) {
     let event = result.unwrap();
     if event.kind.is_modify() {
         util::sleep_ms(2000);
         // update config:
         futures::executor::block_on(async {
-            match settings::Settings::new() {
+            match settings::Settings::new(config_filename) {
                 Ok(settings) => {
                     TASK_MANAGER.write().await.refresh_config(&settings);
                     let mut re_set_list = RE_SET_LIST.write().await;
@@ -244,7 +269,10 @@ mod test {
     use warp::Filter;
 
     async fn setup() {
-        TASK_MANAGER.write().await.refresh_config(&get_settings());
+        let settings = get_settings();
+        TASK_MANAGER.write().await.refresh_config(&settings);
+        let mut global_re_set_list = RE_SET_LIST.write().await;
+        *global_re_set_list = create_re_set_list(&settings.rules);
     }
 
     fn get_settings() -> Settings {

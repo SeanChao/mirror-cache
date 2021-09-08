@@ -60,8 +60,19 @@ pub enum PolicyType {
 }
 
 impl Settings {
-    pub fn new() -> Result<Self> {
-        Self::new_from("config", "app")
+    pub fn default() -> Self {
+        Settings {
+            port: 9000,
+            metrics_port: 9001,
+            redis: Redis { url: "redis://localhost".to_string() },
+            log_level: "info".to_string(),
+            rules: vec![],
+            policies: vec![],
+        }
+    }
+
+    pub fn new(filename: &str) -> Result<Self> {
+        Self::new_from(filename, "app")
     }
 
     pub fn new_from(filename: &str, env_prefix: &str) -> Result<Self> {

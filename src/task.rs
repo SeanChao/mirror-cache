@@ -105,6 +105,19 @@ impl TaskManager {
         }
     }
 
+    pub fn empty() -> Self {
+        Self {
+            config: Settings::default(),
+            pypi_index_cache: Arc::new(NoCache {}),
+            pypi_pkg_cache: Arc::new(NoCache {}),
+            anaconda_index_cache: Arc::new(NoCache {}),
+            anaconda_pkg_cache: Arc::new(NoCache {}),
+            rule_map: HashMap::new(),
+            task_set: Arc::new(RwLock::new(HashSet::new())),
+            rewrite_map: HashMap::new(),
+        }
+    }
+
     pub async fn resolve_task(&self, task: &Task) -> (Result<TaskResponse>, CacheHitMiss) {
         // try get from cache
         let mut cache_result = None;
