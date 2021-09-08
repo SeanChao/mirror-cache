@@ -64,7 +64,9 @@ impl Settings {
         Settings {
             port: 9000,
             metrics_port: 9001,
-            redis: Redis { url: "redis://localhost".to_string() },
+            redis: Redis {
+                url: "redis://localhost".to_string(),
+            },
             log_level: "info".to_string(),
             rules: vec![],
             policies: vec![],
