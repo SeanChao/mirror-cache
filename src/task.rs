@@ -1,9 +1,10 @@
-use crate::cache::{CacheData, CacheHitMiss, CachePolicy, LruRedisCache, NoCache, TtlRedisCache};
+use crate::cache::{Cache, CacheData, CacheHitMiss, LruCache, NoCache, RedisMetadataDb, TtlCache};
 use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
 use crate::settings::Settings;
 use crate::settings::{Policy, PolicyType, Rewrite};
+use crate::storage::Storage;
 use crate::util;
 
 use bytes::Bytes;
@@ -79,12 +80,12 @@ pub type RuleId = usize;
 #[derive(Clone)]
 pub struct TaskManager {
     pub config: Settings,
-    pub pypi_index_cache: Arc<dyn CachePolicy>,
-    pub pypi_pkg_cache: Arc<dyn CachePolicy>,
-    pub anaconda_index_cache: Arc<dyn CachePolicy>,
-    pub anaconda_pkg_cache: Arc<dyn CachePolicy>,
+    pub pypi_index_cache: Arc<dyn Cache>,
+    pub pypi_pkg_cache: Arc<dyn Cache>,
+    pub anaconda_index_cache: Arc<dyn Cache>,
+    pub anaconda_pkg_cache: Arc<dyn Cache>,
     /// RuleId -> (cache, size_limit)
-    pub rule_map: HashMap<RuleId, (Arc<dyn CachePolicy>, usize)>,
+    pub rule_map: HashMap<RuleId, (Arc<dyn Cache>, usize)>,
     /// Specifies how to do the upstream rewrite for RuleId.
     /// RuleId -> Vec<Rewrite>
     pub rewrite_map: HashMap<RuleId, Vec<Rewrite>>,
@@ -203,7 +204,7 @@ impl TaskManager {
             policy_map.insert(rule.policy.clone());
         }
 
-        let mut cache_map: HashMap<String, Arc<dyn CachePolicy>> = HashMap::new();
+        let mut cache_map: HashMap<String, Arc<dyn Cache>> = HashMap::new();
         let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
         // create cache for each policy
         for policy in &policy_map {
@@ -235,26 +236,36 @@ impl TaskManager {
         policy_name: &str,
         policies: &Vec<Policy>,
         redis_client: Option<redis::Client>,
-    ) -> Result<Arc<dyn CachePolicy>> {
+    ) -> Result<Arc<dyn Cache>> {
         let policy_ident = policy_name;
         for (idx, p) in policies.iter().enumerate() {
             if p.name == policy_ident {
                 let policy_type = p.typ;
                 match policy_type {
                     PolicyType::Lru => {
-                        return Ok(Arc::new(LruRedisCache::new(
-                            p.path.as_ref().unwrap(),
+                        return Ok(Arc::new(LruCache::new(
+                            // p.path.as_ref().unwrap(),
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
-                            redis_client.unwrap(),
-                            &format!("lru_rule_{}", idx),
+                            Arc::new(Box::new(RedisMetadataDb::new(
+                                redis_client.unwrap(),
+                                format!("lru_rule_{}", idx),
+                            ))),
+                            Storage::FileSystem {
+                                root_dir: p.path.clone().unwrap(),
+                            },
+                            format!("lru_rule_{}", idx),
                         )));
                     }
                     PolicyType::Ttl => {
-                        return Ok(Arc::new(TtlRedisCache::new(
-                            p.path.as_ref().unwrap(),
+                        return Ok(Arc::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
-                            redis_client.unwrap(),
-                            &format!("ttl_rule_{}", idx),
+                            Arc::new(Box::new(RedisMetadataDb::new(
+                                redis_client.unwrap(),
+                                format!("ttl_rule_{}", idx),
+                            ))),
+                            Storage::FileSystem {
+                                root_dir: p.path.clone().unwrap(),
+                            },
                         )));
                     }
                 };
@@ -388,7 +399,7 @@ impl TaskManager {
         }
     }
 
-    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn CachePolicy>> {
+    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn Cache>> {
         match self.rule_map.get(&rule_id) {
             Some(tuple) => Some(tuple.0.clone()),
             None => None,
