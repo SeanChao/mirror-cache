@@ -11,8 +11,10 @@ use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
 use redis;
 use redis::Commands;
+use sled::transaction::TransactionResult;
 use sled::Transactional;
 use std::convert::AsRef;
+use std::convert::TryInto;
 use std::fmt;
 use std::marker::Send;
 use std::str;
@@ -118,8 +120,6 @@ pub trait TtlMetadataStore: Sync + Send {
         storage: &Storage,
         pending_close: Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>>;
-
-    fn set_expire(&self, key: &str, expire: u64) -> Result<()>;
 }
 
 pub struct LruCache {
@@ -216,28 +216,20 @@ impl Cache for TtlCache {
             CacheHitMiss::Hit => {
                 return match self.storage.read(key).await {
                     Ok(data) => {
-                        // trace!("CACHE GET [HIT] {} -> {:?} ", redis_key, &cache_result);
+                        trace!("CACHE GET [HIT] {} -> {:?} ", key, data);
                         Some(data)
                     }
                     Err(_) => None,
                 };
             }
             CacheHitMiss::Miss => {
-                // trace!("CACHE GET [MISS] {} -> {:?} ", redis_key, &cache_result);
+                trace!("CACHE GET [MISS] {}", key);
                 None
             }
         }
     }
     async fn put(&self, key: &str, mut entry: CacheData) {
-        // let redis_key =
         self.metadata_db.set_ttl_entry(key, &mut entry, self.ttl);
-        match self.metadata_db.set_expire(key, self.ttl) {
-            Ok(_) => {}
-            Err(_) => {
-                // TODO:
-                error!("set expire failed key={}", key);
-            }
-        }
         self.storage.persist(key, &mut entry).await;
     }
 }
@@ -505,17 +497,6 @@ impl TtlMetadataStore for RedisMetadataDb {
         });
         Ok(expiration_thread_handler)
     }
-
-    fn set_expire(&self, key: &str, ttl: u64) -> Result<()> {
-        let mut con = self.redis_client.get_connection().unwrap();
-        match models::expire(&mut con, key, ttl as usize) {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                error!("set cache entry ttl for {} failed: {}", key, e);
-                Err(e)
-            }
-        }
-    }
 }
 
 impl Drop for TtlCache {
@@ -524,6 +505,7 @@ impl Drop for TtlCache {
         self.pending_close
             .store(true, std::sync::atomic::Ordering::SeqCst);
         if let Some(thread_handler) = self.expiration_thread_handler.take() {
+            thread_handler.thread().unpark();
             thread_handler.join().unwrap();
             trace!("spawned thread dropped.");
         } else {
@@ -534,16 +516,18 @@ impl Drop for TtlCache {
 
 /// A wrapper for Sled
 pub struct SledMetadataDb {
-    /// RocksDB instance
     db: sled::Db,
     metadata_tree: sled::Tree,
     atime_tree: sled::Tree,
     /// Column family name
     cf: String,
+    // TTL
+    /// interval of periodic cleanup of expired entries in seconds
+    clean_interval: u64,
 }
 
 impl SledMetadataDb {
-    pub fn new(path: &str, cf_name: &str) -> Self {
+    pub fn new_lru(path: &str, cf_name: &str) -> Self {
         let db = sled::open(path).unwrap();
         let metadata_tree = db.open_tree(cf_name).unwrap();
         let atime_tree = db.open_tree(format!("{}_atime_tree", path)).unwrap();
@@ -557,6 +541,20 @@ impl SledMetadataDb {
             metadata_tree,
             atime_tree,
             cf: cf_name.to_string(),
+            clean_interval: 0,
+        }
+    }
+
+    pub fn new_ttl(path: &str, cf_name: &str, clean_interval: u64) -> Self {
+        let db = sled::open(path).unwrap();
+        let metadata_tree = db.open_tree(cf_name).unwrap();
+        let atime_tree = db.open_tree(format!("{}_atime_tree", path)).unwrap();
+        Self {
+            db,
+            metadata_tree,
+            atime_tree,
+            cf: cf_name.to_string(),
+            clean_interval,
         }
     }
 }
@@ -646,15 +644,12 @@ impl LruMetadataStore for SledMetadataDb {
                     }
                     let entry: SledMetadata = metadata_tree.get(filename).unwrap().unwrap().into();
                     let file_size = entry.size;
-                    // let cache_size = models::sled_lru_get_current_size_notx(db, prefix) - file_size;
-                    // models::sled_lru_set_current_size_notx(db, prefix, cache_size);
                     let cache_size = models::sled_lru_get_current_size(db, prefix) - file_size;
                     models::sled_lru_set_current_size(db, prefix, cache_size);
                     metadata_tree.remove(filename).unwrap();
                     atime_tree.remove(&atime_tree_val.0).unwrap();
                     Ok(())
                 });
-            // .unwrap();
         }
     }
 
@@ -662,6 +657,84 @@ impl LruMetadataStore for SledMetadataDb {
         self.db
             .transaction::<_, _, ()>(|tx_db| Ok(models::sled_lru_get_current_size(tx_db, &self.cf)))
             .unwrap()
+    }
+}
+
+impl TtlMetadataStore for SledMetadataDb {
+    fn get_ttl_entry(&self, key: &str) -> CacheHitMiss {
+        match self.metadata_tree.get(key) {
+            Ok(Some(val)) => {
+                let exp_time: i64 = i64::from_be_bytes(val.as_ref().try_into().unwrap());
+                if exp_time > util::now_nanos() {
+                    CacheHitMiss::Hit
+                } else {
+                    CacheHitMiss::Miss
+                }
+            }
+            Ok(None) => CacheHitMiss::Miss,
+            Err(e) => {
+                error!("failed to get ttl entry {}: {:?}", key, e);
+                CacheHitMiss::Miss
+            }
+        }
+    }
+
+    fn set_ttl_entry(&self, key: &str, _value: &CacheData, ttl: u64) {
+        let _tx_result: TransactionResult<_, ()> = (&self.atime_tree, &self.metadata_tree)
+            .transaction(|(atime_tree, metadata_tree)| {
+                let expire_time = (util::now_nanos() + ttl as i64 * 1000_000_000).to_be_bytes();
+                atime_tree.insert(&expire_time, key).unwrap();
+                metadata_tree.insert(key, &expire_time).unwrap();
+                Ok(())
+            });
+        trace!("CACHE SET {} TTL={}", &key, ttl);
+    }
+
+    fn spawn_expiration_cleanup_thread(
+        &self,
+        storage: &Storage,
+        pending_close: Arc<AtomicBool>,
+    ) -> Result<JoinHandle<()>> {
+        let storage_clone = storage.clone();
+        let pending_close_clone = pending_close.clone();
+        let atime_tree = self.atime_tree.clone();
+        let metadata_tree = self.metadata_tree.clone();
+        let clean_interval = self.clean_interval;
+        let expiration_thread_handler = std::thread::spawn(move || {
+            debug!("TTL expiration listener is created! (sled)");
+            loop {
+                if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let time = util::now_nanos();
+                atime_tree.range(..time.to_be_bytes()).for_each(|e| {
+                    let e = e.unwrap();
+                    let key = std::str::from_utf8(&e.1.as_ref()).unwrap();
+                    let _tx_result: TransactionResult<_, ()> = (&atime_tree, &metadata_tree)
+                        .transaction(|(atime_tree, metadata_tree)| {
+                            atime_tree.remove(&e.0).unwrap();
+                            metadata_tree.remove(&e.1).unwrap();
+                            Ok(())
+                        });
+                    match storage_clone.remove(key) {
+                        Ok(_) => {
+                            increment_counter!(metric::CNT_RM_FILES);
+                            info!("TTL cache removed {}", &key);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to remove {}: {}. Please clean it manually.",
+                                &key, e
+                            );
+                        }
+                    }
+                });
+                // park the thread, and unpark it when `drop` is called so that
+                // configuration update will no be blocked.
+                std::thread::park_timeout(std::time::Duration::from_secs(clean_interval));
+            }
+        });
+        Ok(expiration_thread_handler)
     }
 }
 
@@ -812,7 +885,7 @@ mod tests {
         ($dir: expr, $size: expr, $id: expr) => {
             LruCache::new(
                 $size,
-                Arc::new(Box::new(SledMetadataDb::new(
+                Arc::new(Box::new(SledMetadataDb::new_lru(
                     &format!("{}/sled", $dir),
                     $id,
                 ))),

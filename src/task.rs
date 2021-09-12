@@ -256,7 +256,7 @@ impl TaskManager {
                         let id = format!("lru_rule_{}", idx);
                         return Ok(Arc::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
-                            Arc::new(Box::new(SledMetadataDb::new(
+                            Arc::new(Box::new(SledMetadataDb::new_lru(
                                 &format!("{}/{}", sled_metadata_path, &id),
                                 &id,
                             ))),
@@ -278,7 +278,20 @@ impl TaskManager {
                             },
                         )));
                     }
-                    _ => todo!(),
+                    (PolicyType::Ttl, MetadataDb::Sled) => {
+                        let id = format!("ttl_rule_{}", policy_ident);
+                        return Ok(Arc::new(TtlCache::new(
+                            p.timeout.unwrap_or(0),
+                            Arc::new(Box::new(SledMetadataDb::new_ttl(
+                                &format!("{}/{}", sled_metadata_path, &id),
+                                &id,
+                                p.clean_interval.unwrap(),
+                            ))),
+                            Storage::FileSystem {
+                                root_dir: p.path.clone().unwrap(),
+                            },
+                        )));
+                    }
                 };
             }
         }

@@ -43,6 +43,7 @@ pub struct Policy {
     pub timeout: Option<u64>,
     pub size: Option<String>,
     pub path: Option<String>, // cache path
+    pub clean_interval: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

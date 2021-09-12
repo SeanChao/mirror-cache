@@ -53,9 +53,10 @@ rules:
 policies:
   - name: policy_ttl_60
     type: TTL
-    metadata_db: redis
+    metadata_db: sled
     path: "cache/ttl"
-    timeout: 120
+    timeout: 3
+    clean_interval: 60 # TTL cache cleanup interval, for sled only
   - name: policy_lru
     type: LRU
     metadata_db: sled
