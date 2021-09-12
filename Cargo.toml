@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.6", features = ["codec"] }
 serde_derive = "^1.0"
 serde = "^1.0"
+sled = "0.34"
 warp = "0.3"
 
 [dev-dependencies]

@@ -7,6 +7,7 @@ pub struct Settings {
     pub port: u16,
     pub metrics_port: u16,
     redis: Redis,
+    pub sled: Sled,
     pub log_level: String,
     pub rules: Vec<Rule>,
     pub policies: Vec<Policy>,
@@ -15,6 +16,11 @@ pub struct Settings {
 #[derive(Debug, Deserialize, Clone)]
 struct Redis {
     url: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Sled {
+    pub metadata_path: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -33,6 +39,7 @@ pub struct Policy {
     pub name: String,
     #[serde(rename = "type")]
     pub typ: PolicyType,
+    pub metadata_db: MetadataDb,
     pub timeout: Option<u64>,
     pub size: Option<String>,
     pub path: Option<String>, // cache path
@@ -59,6 +66,14 @@ pub enum PolicyType {
     Ttl,
 }
 
+#[derive(Debug, Deserialize, Copy, Clone)]
+pub enum MetadataDb {
+    #[serde(rename = "sled")]
+    Sled,
+    #[serde(rename = "redis")]
+    Redis,
+}
+
 impl Settings {
     pub fn default() -> Self {
         Settings {
@@ -66,6 +81,9 @@ impl Settings {
             metrics_port: 9001,
             redis: Redis {
                 url: "redis://localhost".to_string(),
+            },
+            sled: Sled {
+                metadata_path: "sled/metadata".to_string(),
             },
             log_level: "info".to_string(),
             rules: vec![],

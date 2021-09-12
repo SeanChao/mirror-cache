@@ -57,7 +57,7 @@ async fn main() {
                 .takes_value(true),
         )
         .get_matches();
-    println!("CLI args: {:?}", matches);
+    debug!("CLI args: {:?}", matches);
     let config_filename = matches
         .value_of("config")
         .unwrap_or("config.yml")
@@ -74,6 +74,7 @@ async fn main() {
         .filter_module("hyper::proto", log::LevelFilter::Error) // hide excessive logs
         .filter_module("tracing::span", log::LevelFilter::Error)
         .filter_module("tokio_util::codec", log::LevelFilter::Error)
+        .filter_module("sled::pagecache", log::LevelFilter::Error)
         .filter_level(app_settings.get_log_level())
         .init();
 

@@ -1,9 +1,11 @@
-use crate::cache::{Cache, CacheData, CacheHitMiss, LruCache, NoCache, RedisMetadataDb, TtlCache};
+use crate::cache::{
+    Cache, CacheData, CacheHitMiss, LruCache, RedisMetadataDb, SledMetadataDb, TtlCache,
+};
 use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
 use crate::settings::Settings;
-use crate::settings::{Policy, PolicyType, Rewrite};
+use crate::settings::{MetadataDb, Policy, PolicyType, Rewrite};
 use crate::storage::Storage;
 use crate::util;
 
@@ -80,10 +82,6 @@ pub type RuleId = usize;
 #[derive(Clone)]
 pub struct TaskManager {
     pub config: Settings,
-    pub pypi_index_cache: Arc<dyn Cache>,
-    pub pypi_pkg_cache: Arc<dyn Cache>,
-    pub anaconda_index_cache: Arc<dyn Cache>,
-    pub anaconda_pkg_cache: Arc<dyn Cache>,
     /// RuleId -> (cache, size_limit)
     pub rule_map: HashMap<RuleId, (Arc<dyn Cache>, usize)>,
     /// Specifies how to do the upstream rewrite for RuleId.
@@ -96,10 +94,6 @@ impl TaskManager {
     pub fn new(config: Settings) -> Self {
         TaskManager {
             config,
-            pypi_index_cache: Arc::new(NoCache {}),
-            pypi_pkg_cache: Arc::new(NoCache {}),
-            anaconda_index_cache: Arc::new(NoCache {}),
-            anaconda_pkg_cache: Arc::new(NoCache {}),
             rule_map: HashMap::new(),
             task_set: Arc::new(RwLock::new(HashSet::new())),
             rewrite_map: HashMap::new(),
@@ -109,10 +103,6 @@ impl TaskManager {
     pub fn empty() -> Self {
         Self {
             config: Settings::default(),
-            pypi_index_cache: Arc::new(NoCache {}),
-            pypi_pkg_cache: Arc::new(NoCache {}),
-            anaconda_index_cache: Arc::new(NoCache {}),
-            anaconda_pkg_cache: Arc::new(NoCache {}),
             rule_map: HashMap::new(),
             task_set: Arc::new(RwLock::new(HashSet::new())),
             rewrite_map: HashMap::new(),
@@ -204,16 +194,21 @@ impl TaskManager {
             policy_map.insert(rule.policy.clone());
         }
 
+        // Clear cache here, so that previous cache objects can be dropped
+        tm.rule_map.clear();
         let mut cache_map: HashMap<String, Arc<dyn Cache>> = HashMap::new();
         let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
         // create cache for each policy
         for policy in &policy_map {
-            let cache =
-                Self::create_cache_from_rule(&policy, &policies, Some(redis_client.clone()));
+            let cache = Self::create_cache_from_rule(
+                &policy,
+                &policies,
+                Some(redis_client.clone()),
+                &app_settings.sled.metadata_path,
+            );
             cache_map.insert(policy.to_string(), cache.unwrap());
         }
 
-        tm.rule_map.clear();
         for (idx, rule) in app_settings.rules.iter().enumerate() {
             debug!("creating rule #{}: {:?}", idx, rule);
             let cache = cache_map.get(&rule.policy).unwrap().clone();
@@ -236,15 +231,16 @@ impl TaskManager {
         policy_name: &str,
         policies: &Vec<Policy>,
         redis_client: Option<redis::Client>,
+        sled_metadata_path: &str,
     ) -> Result<Arc<dyn Cache>> {
         let policy_ident = policy_name;
         for (idx, p) in policies.iter().enumerate() {
             if p.name == policy_ident {
                 let policy_type = p.typ;
-                match policy_type {
-                    PolicyType::Lru => {
+                let metadata_db = p.metadata_db;
+                match (policy_type, metadata_db) {
+                    (PolicyType::Lru, MetadataDb::Redis) => {
                         return Ok(Arc::new(LruCache::new(
-                            // p.path.as_ref().unwrap(),
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
                             Arc::new(Box::new(RedisMetadataDb::new(
                                 redis_client.unwrap(),
@@ -256,7 +252,21 @@ impl TaskManager {
                             format!("lru_rule_{}", idx),
                         )));
                     }
-                    PolicyType::Ttl => {
+                    (PolicyType::Lru, MetadataDb::Sled) => {
+                        let id = format!("lru_rule_{}", idx);
+                        return Ok(Arc::new(LruCache::new(
+                            p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
+                            Arc::new(Box::new(SledMetadataDb::new(
+                                &format!("{}/{}", sled_metadata_path, &id),
+                                &id,
+                            ))),
+                            Storage::FileSystem {
+                                root_dir: p.path.clone().unwrap(),
+                            },
+                            format!("lru_rule_{}", idx),
+                        )));
+                    }
+                    (PolicyType::Ttl, MetadataDb::Redis) => {
                         return Ok(Arc::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
                             Arc::new(Box::new(RedisMetadataDb::new(
@@ -268,6 +278,7 @@ impl TaskManager {
                             },
                         )));
                     }
+                    _ => todo!(),
                 };
             }
         }

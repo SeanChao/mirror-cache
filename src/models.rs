@@ -3,7 +3,10 @@ use crate::cache::LruCacheMetadata;
 use crate::error::Error::*;
 use crate::error::Result;
 use redis::{aio::Connection, Commands, Connection as SyncConnection};
+use sled::transaction::TransactionalTree;
+use sled::IVec;
 use std::collections::HashMap;
+use std::convert::{From, TryInto};
 
 #[allow(dead_code)]
 pub async fn get_con(client: &redis::Client) -> Result<Connection> {
@@ -114,6 +117,122 @@ pub fn expire(con: &mut SyncConnection, key: &str, ttl: usize) -> Result<i32> {
     }
 }
 
+pub struct SledMetadata {
+    pub atime: i64,
+    pub size: u64,
+}
+
+impl From<sled::IVec> for SledMetadata {
+    fn from(vec: sled::IVec) -> Self {
+        Self {
+            atime: i64::from_be_bytes(vec.subslice(0, 8).as_ref().try_into().unwrap()),
+            size: u64::from_be_bytes(vec.subslice(8, 8).as_ref().try_into().unwrap()),
+        }
+    }
+}
+
+impl Into<IVec> for SledMetadata {
+    fn into(self) -> IVec {
+        [self.atime.to_be_bytes(), self.size.to_be_bytes()]
+            .concat()
+            .into()
+    }
+}
+
+/// Update the atime for the given cache key.
+/// This should be called within a transaction context to ensure atomicity.
+pub fn sled_update_cache_entry_atime(
+    metadata_tree: &TransactionalTree,
+    atime_tree: &TransactionalTree,
+    key: &str,
+    atime: i64,
+) {
+    let old_entry: SledMetadata = metadata_tree.get(key).unwrap().unwrap().into();
+    let old_atime = old_entry.atime;
+    atime_tree.remove(&old_atime.to_be_bytes()).unwrap();
+    let new_metadata = SledMetadata {
+        atime,
+        size: old_entry.size,
+    };
+    metadata_tree.insert(key, new_metadata).unwrap();
+    atime_tree.insert(&atime.to_be_bytes(), key).unwrap();
+}
+
+pub fn sled_insert_cache_entry(
+    db: &TransactionalTree,
+    prefix: &str,
+    metadata_tree: &TransactionalTree,
+    atime_tree: &TransactionalTree,
+    key: &str,
+    size: u64,
+    atime: i64,
+) {
+    match metadata_tree.insert(key, SledMetadata { atime, size }) {
+        Ok(Some(old_entry)) => {
+            // remove old entry in atime_tree
+            let old_entry: SledMetadata = old_entry.into();
+            atime_tree.remove(&old_entry.atime.to_be_bytes()).unwrap();
+            sled_lru_set_current_size(
+                db,
+                prefix,
+                sled_lru_get_current_size(db, prefix) - old_entry.size,
+            );
+            trace!(
+                "sled_insert_cache_entry updated entry {} -> ({} , {})",
+                key,
+                atime,
+                size
+            );
+        }
+        Ok(None) => {
+            trace!(
+                "sled_insert_cache_entry inserted entry {} -> ({} , {})",
+                key,
+                atime,
+                size
+            );
+        }
+        Err(e) => {
+            error!("Error inserting cache entry: {}", e);
+        }
+    };
+    atime_tree.insert(&atime.to_be_bytes(), key).unwrap();
+}
+
+pub fn sled_lru_get_current_size(db: &sled::transaction::TransactionalTree, prefix: &str) -> u64 {
+    let total_size_raw: [u8; 8] = db
+        .get(format!("{}_total_size", prefix))
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .try_into()
+        .unwrap();
+    u64::from_be_bytes(total_size_raw)
+}
+
+pub fn sled_lru_get_current_size_notx(db: &sled::Db, prefix: &str) -> u64 {
+    let total_size_raw: [u8; 8] = db
+        .get(format!("{}_total_size", prefix))
+        .unwrap()
+        .unwrap()
+        .as_ref()
+        .try_into()
+        .unwrap();
+    u64::from_be_bytes(total_size_raw)
+}
+
+pub fn sled_lru_set_current_size(
+    db: &sled::transaction::TransactionalTree,
+    prefix: &str,
+    size: u64,
+) {
+    db.insert(
+        format!("{}_total_size", prefix).as_str(),
+        &size.to_be_bytes(),
+    )
+    .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +274,29 @@ mod tests {
         thread::sleep(std::time::Duration::from_millis(1500));
         let val_actual = get(&mut con, key).unwrap();
         assert_eq!(val_actual, None);
+    }
+
+    #[test]
+    fn sled_metadata_to_ivec() {
+        let metadata = SledMetadata {
+            atime: 233,
+            size: 0xaabbccdddeadbeef,
+        };
+        let ivec: IVec = metadata.into();
+        assert_eq!(
+            ivec,
+            vec![0, 0, 0, 0, 0, 0, 0, 233, 0xaa, 0xbb, 0xcc, 0xdd, 0xde, 0xad, 0xbe, 0xef]
+        );
+    }
+
+    #[test]
+    fn sled_ivec_to_metadata() {
+        let ivec: IVec = vec![
+            0, 0, 0, 0, 0, 0, 0, 233, 0xaa, 0xbb, 0xcc, 0xdd, 0xde, 0xad, 0xbe, 0xef,
+        ]
+        .into();
+        let metadata: SledMetadata = ivec.into();
+        assert_eq!(metadata.atime, 233);
+        assert_eq!(metadata.size, 0xaabbccdddeadbeef);
     }
 }

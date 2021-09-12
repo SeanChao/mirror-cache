@@ -8,6 +8,10 @@ pub fn now() -> i64 {
     chrono::offset::Local::now().timestamp()
 }
 
+pub fn now_nanos() -> i64 {
+    chrono::offset::Local::now().timestamp_nanos()
+}
+
 pub async fn make_request(url: &str) -> Result<reqwest::Response> {
     increment_counter!(metric::CNT_OUT_REQUESTS);
     let client = ClientBuilder::new().build().unwrap();
@@ -30,4 +34,15 @@ pub fn sleep_ms(ms: u64) {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enough_precision_for_key_usage() {
+        let mut set = std::collections::HashSet::new();
+        for _ in 0..100 {
+            set.insert(now_nanos());
+        }
+        assert_eq!(set.len(), 100);
+    }
+}

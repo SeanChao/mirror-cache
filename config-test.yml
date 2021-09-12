@@ -5,6 +5,9 @@ log_level: trace
 redis:
   url: redis://localhost:3001
 
+sled:
+  metadata_path: cache/test/sled_metadata
+
 rules:
   # PyPI index
   - path: "pypi/simple"
@@ -42,17 +45,21 @@ rules:
 policies:
   - name: policy_ttl
     type: TTL
+    metadata_db: redis
     path: "cache/ttl"
     timeout: 3
   - name: policy_lru
     type: LRU
+    metadata_db: sled
     size: 1073741824
     path: "cache/lru"
   - name: policy_lru_anaconda
     type: LRU
+    metadata_db: redis
     size: 1073741824
     path: "cache/lru"
   - name: policy_ubuntu
     type: LRU
+    metadata_db: sled
     size: 0x2000000 # 32M
     path: cache/ubuntu

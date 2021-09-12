@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::metric;
 use crate::models;
+use crate::models::SledMetadata;
 use crate::storage::Storage;
 use crate::util;
 
@@ -10,8 +11,11 @@ use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
 use redis;
 use redis::Commands;
+use sled::Transactional;
+use std::convert::AsRef;
 use std::fmt;
 use std::marker::Send;
+use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -99,9 +103,9 @@ pub trait Cache: Sync + Send {
 }
 
 pub trait LruMetadataStore: Sync + Send {
-    /// Run eviction policy if needed, reserve at least `size` for new cache entry.
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss;
     fn set_lru_entry(&self, key: &str, value: &CacheData);
+    /// Run eviction policy if needed, reserve at least `size` for new cache entry.
     fn evict(&self, new_size: u64, new_key: &str, size_limit: u64, storage: &Storage);
     fn get_total_size(&self) -> u64;
 }
@@ -528,6 +532,139 @@ impl Drop for TtlCache {
     }
 }
 
+/// A wrapper for Sled
+pub struct SledMetadataDb {
+    /// RocksDB instance
+    db: sled::Db,
+    metadata_tree: sled::Tree,
+    atime_tree: sled::Tree,
+    /// Column family name
+    cf: String,
+}
+
+impl SledMetadataDb {
+    pub fn new(path: &str, cf_name: &str) -> Self {
+        let db = sled::open(path).unwrap();
+        let metadata_tree = db.open_tree(cf_name).unwrap();
+        let atime_tree = db.open_tree(format!("{}_atime_tree", path)).unwrap();
+        db.transaction::<_, _, ()>(|tx_db| {
+            models::sled_lru_set_current_size(tx_db, cf_name, 0);
+            Ok(())
+        })
+        .unwrap();
+        Self {
+            db,
+            metadata_tree,
+            atime_tree,
+            cf: cf_name.to_string(),
+        }
+    }
+}
+
+/// An LRU Cache implementation with Sled.
+///
+/// Two mappings are maintained:
+/// 1. filename -> (size, atime)
+/// 2. atime -> filename
+/// The `filename` is the external cache key. Its `atime` is stored to remove old
+/// atime mapping.
+///
+impl LruMetadataStore for SledMetadataDb {
+    fn get_lru_entry(&self, key: &str) -> CacheHitMiss {
+        let tx_result: sled::transaction::TransactionResult<_, ()> =
+            (&self.metadata_tree, &self.atime_tree).transaction(|(metadata_tree, atime_tree)| {
+                match metadata_tree.get(key) {
+                    Ok(Some(_)) => {
+                        // update cache entry in db
+                        let new_atime = util::now_nanos();
+                        models::sled_update_cache_entry_atime(
+                            metadata_tree,
+                            atime_tree,
+                            key,
+                            new_atime,
+                        );
+                        Ok(CacheHitMiss::Hit)
+                    }
+                    _ => Ok(CacheHitMiss::Miss),
+                }
+            });
+        tx_result.unwrap()
+    }
+
+    fn set_lru_entry(&self, key: &str, value: &CacheData) {
+        let atime = util::now_nanos();
+        let db_tree: &sled::Tree = &self.db;
+        (db_tree, &self.metadata_tree, &self.atime_tree)
+            .transaction(|(db, metadata_tree, atime_tree)| {
+                models::sled_insert_cache_entry(
+                    db,
+                    &self.cf,
+                    metadata_tree,
+                    atime_tree,
+                    key,
+                    value.len() as u64,
+                    atime,
+                );
+                models::sled_lru_set_current_size(
+                    db,
+                    &self.cf,
+                    models::sled_lru_get_current_size(db, &self.cf) + value.len() as u64,
+                );
+                if false {
+                    return Err(sled::transaction::ConflictableTransactionError::Abort(()));
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Run eviction policy if needed, reserve at least `size` for new cache entry.
+    fn evict(&self, evict_size: u64, _new_key: &str, size_limit: u64, storage: &Storage) {
+        let db = &self.db;
+        let prefix = &self.cf;
+        let default_tree: &sled::Tree = db;
+        let atime_tree = &self.atime_tree;
+        let metadata_tree = &self.metadata_tree;
+        while models::sled_lru_get_current_size_notx(db, prefix) + evict_size > size_limit {
+            let atime_tree_val = atime_tree.first().unwrap().unwrap();
+            // An eviction is atomic
+            let _tx_result: sled::transaction::TransactionResult<_, ()> = (
+                default_tree,
+                atime_tree,
+                metadata_tree,
+            )
+                .transaction::<_, _>(|(db, atime_tree, metadata_tree)| {
+                    let filename: &str = std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
+                    match storage.remove(filename) {
+                        Ok(_) => {
+                            increment_counter!(metric::CNT_RM_FILES);
+                            info!("LRU sled cache removed {}", &filename);
+                        }
+                        Err(e) => {
+                            warn!("failed to remove file: {:?}", e);
+                        }
+                    }
+                    let entry: SledMetadata = metadata_tree.get(filename).unwrap().unwrap().into();
+                    let file_size = entry.size;
+                    // let cache_size = models::sled_lru_get_current_size_notx(db, prefix) - file_size;
+                    // models::sled_lru_set_current_size_notx(db, prefix, cache_size);
+                    let cache_size = models::sled_lru_get_current_size(db, prefix) - file_size;
+                    models::sled_lru_set_current_size(db, prefix, cache_size);
+                    metadata_tree.remove(filename).unwrap();
+                    atime_tree.remove(&atime_tree_val.0).unwrap();
+                    Ok(())
+                });
+            // .unwrap();
+        }
+    }
+
+    fn get_total_size(&self) -> u64 {
+        self.db
+            .transaction::<_, _, ()>(|tx_db| Ok(models::sled_lru_get_current_size(tx_db, &self.cf)))
+            .unwrap()
+    }
+}
+
 #[derive(Hash, Eq, PartialEq, Debug)]
 pub struct CacheEntry<Metadata, Key, Value> {
     pub metadata: Metadata,
@@ -580,6 +717,7 @@ mod tests {
     use super::*;
     use futures::stream::{self};
     use futures::StreamExt;
+    use lazy_static::lazy_static;
     use pretty_env_logger;
     use std::fs;
     use std::io;
@@ -615,8 +753,19 @@ mod tests {
     static TEST_CACHE_DIR: &str = "cache";
 
     fn setup() {
-        let mut log_builder = pretty_env_logger::formatted_builder();
-        log_builder.filter_level(log::LevelFilter::Debug).init()
+        lazy_static! {
+            /// Initialize logger only once.
+            static ref LOGGER: () = {
+                let mut log_builder = pretty_env_logger::formatted_builder();
+                log_builder
+                    .filter_module("sled", log::LevelFilter::Info)
+                    .filter_level(log::LevelFilter::Trace)
+                    .target(pretty_env_logger::env_logger::Target::Stdout)
+                    .init();
+                ()
+            };
+        };
+        &LOGGER;
     }
 
     fn new_redis_client() -> redis::Client {
@@ -650,6 +799,22 @@ mod tests {
                 Arc::new(Box::new(RedisMetadataDb::new(
                     $redis_client,
                     $id.to_string(),
+                ))),
+                Storage::FileSystem {
+                    root_dir: $dir.to_string(),
+                },
+                $id.to_string(),
+            )
+        };
+    }
+
+    macro_rules! new_lru_sled_cache {
+        ($dir: expr, $size: expr, $id: expr) => {
+            LruCache::new(
+                $size,
+                Arc::new(Box::new(SledMetadataDb::new(
+                    &format!("{}/sled", $dir),
+                    $id,
                 ))),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
@@ -694,7 +859,7 @@ mod tests {
     // }
 
     #[tokio::test]
-    async fn test_cache_entry_set_success() {
+    async fn lru_redis_cache_entry_set_success() {
         let redis_client = new_redis_client();
         let lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
@@ -715,14 +880,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lru_cache_size_constraint() {
-        let redis_client = new_redis_client();
-        let lru_cache = new_lru_redis_cache!(
-            TEST_CACHE_DIR,
-            16,
-            redis_client,
-            "lru_cache_size_constraint"
-        );
+    async fn lru_sled_cache_entry_set_success() {
+        setup();
+        let lru_cache =
+            new_lru_sled_cache!(TEST_CACHE_DIR, 16 * 1024 * 1024, "test_cache_entry_success");
+        let key = "answer";
+        let cached_data = vec![42];
+        let len = cached_data.len();
+        cache_put!(lru_cache, "answer", cached_data.clone().into());
+        let total_size_expected = len as u64;
+        let total_size_actual: u64 = lru_cache.get_total_size();
+        let cached_data_actual = get_file_all(&format!("{}/{}", TEST_CACHE_DIR, key));
+        // metadata: size is 1, file content is the same
+        assert_eq!(total_size_actual, total_size_expected);
+        assert_eq!(&cached_data_actual, &cached_data);
+    }
+
+    async fn lru_cache_size_constaint_tester(lru_cache: LruCache, cached_path: &str) {
         cache_put!(lru_cache, "tsu_ki", vec![0; 5].into());
         let total_size_actual: u64 = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 5);
@@ -731,42 +905,55 @@ mod tests {
         let total_size_actual: u64 = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 16);
         assert_eq!(
-            get_file_all(&format!("{}/{}", TEST_CACHE_DIR, "tsu_ki")),
+            get_file_all(&format!("{}/{}", cached_path, "tsu_ki")),
             vec![0; 5]
         );
         assert_eq!(
-            get_file_all(&format!("{}/{}", TEST_CACHE_DIR, "kirei")),
+            get_file_all(&format!("{}/{}", cached_path, "kirei")),
             vec![0; 11]
         );
         // cache is full, evict tsu_ki
         cache_put!(lru_cache, "suki", vec![1; 4].into());
         assert_eq!(lru_cache.get_total_size(), 15);
         assert_eq!(
-            file_not_exist(&format!("{}/{}", TEST_CACHE_DIR, "tsu_ki")),
+            file_not_exist(&format!("{}/{}", cached_path, "tsu_ki")),
             true
         );
-        // evict both
+        // evict both suki and kirei
         cache_put!(lru_cache, "deadbeef", vec![2; 16].into());
         assert_eq!(lru_cache.get_total_size(), 16);
         assert_eq!(
-            file_not_exist(&format!("{}/{}", TEST_CACHE_DIR, "kirei")),
+            file_not_exist(&format!("{}/{}", cached_path, "kirei")),
             true
         );
+        assert_eq!(file_not_exist(&format!("{}/{}", cached_path, "suki")), true);
         assert_eq!(
-            file_not_exist(&format!("{}/{}", TEST_CACHE_DIR, "suki")),
-            true
-        );
-        assert_eq!(
-            get_file_all(&format!("{}/{}", TEST_CACHE_DIR, "deadbeef")),
+            get_file_all(&format!("{}/{}", cached_path, "deadbeef")),
             vec![2; 16]
         );
     }
 
     #[tokio::test]
-    async fn test_lru_cache_no_evict_recent() {
+    async fn lru_cache_size_constraint() {
         let redis_client = new_redis_client();
-        let lru_cache =
-            new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client, "lru_no_evict_recent");
+        let lru_cache = new_lru_redis_cache!(
+            TEST_CACHE_DIR,
+            16,
+            redis_client,
+            "lru_cache_size_constraint"
+        );
+        lru_cache_size_constaint_tester(lru_cache, TEST_CACHE_DIR).await;
+    }
+
+    #[tokio::test]
+    async fn lru_sled_cache_size_constraint() {
+        setup();
+        let cached_dir = &format!("{}/size_constraint", TEST_CACHE_DIR);
+        let sled_lru_cache = new_lru_sled_cache!(cached_dir, 16, "lru_cache_size_constraint");
+        lru_cache_size_constaint_tester(sled_lru_cache, cached_dir).await;
+    }
+
+    async fn test_lru_cache_no_evict_recent_tester(lru_cache: LruCache) {
         let key1 = "1二号去听经";
         let key2 = "2晚上住旅店";
         let key3 = "3三号去餐厅";
@@ -795,21 +982,19 @@ mod tests {
         assert_eq!(lru_cache.get_total_size(), 3);
     }
 
-    // #[tokio::test]
-    // async fn test_atime_updated_upon_access() {
-    //     let redis_client = new_redis_client();
-    //     let redis_client_tester = new_redis_client();
-    //     let mut con = redis_client_tester.get_connection().unwrap();
-    //     let lru_cache =
-    //         new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client, "atime_updated_upon_access");
-    //     let key = "Shire";
-    //     cache_put!(lru_cache, key, vec![0].into());
-    //     let atime_before: i64 = con.hget(lru_cache.to_prefixed_key(key), "atime").unwrap();
-    //     thread::sleep(time::Duration::from_secs(1));
-    //     cache_get!(lru_cache, key);
-    //     let atime_after: i64 = con.hget(lru_cache.to_prefixed_key(key), "atime").unwrap();
-    //     assert_eq!(atime_before < atime_after, true);
-    // }
+    #[tokio::test]
+    async fn test_lru_cache_no_evict_recent() {
+        let redis_client = new_redis_client();
+        let lru_cache =
+            new_lru_redis_cache!(TEST_CACHE_DIR, 3, redis_client, "lru_no_evict_recent");
+        let lru_sled_cache = new_lru_sled_cache!(
+            &format!("{}/no_evict_recent", TEST_CACHE_DIR),
+            3,
+            "lru_no_evict_recent"
+        );
+        test_lru_cache_no_evict_recent_tester(lru_cache).await;
+        test_lru_cache_no_evict_recent_tester(lru_sled_cache).await;
+    }
 
     #[tokio::test]
     async fn key_update_total_size() {
@@ -825,22 +1010,19 @@ mod tests {
         assert_eq!(lru_cache.get_total_size(), 1);
         cache_put!(lru_cache, key, vec![0, 1].into());
         assert_eq!(lru_cache.get_total_size(), 2);
+        let lru_cache = new_lru_sled_cache!(
+            &format!("{}/key_update_no_change_total_size", TEST_CACHE_DIR),
+            3,
+            "key_update_no_change_total_size"
+        );
+        let key = "Phantom";
+        cache_put!(lru_cache, key, vec![0].into());
+        assert_eq!(lru_cache.get_total_size(), 1);
+        cache_put!(lru_cache, key, vec![0, 1].into());
+        assert_eq!(lru_cache.get_total_size(), 2);
     }
 
-    #[tokio::test]
-    async fn lru_cache_isolation() {
-        let lru_cache_1 = new_lru_redis_cache!(
-            &format!("{}/{}", TEST_CACHE_DIR, "1"),
-            3,
-            new_redis_client(),
-            "cache_isolation_1"
-        );
-        let lru_cache_2 = new_lru_redis_cache!(
-            &format!("{}/{}", TEST_CACHE_DIR, "2"),
-            3,
-            new_redis_client(),
-            "cache_isolation_2"
-        );
+    async fn lru_cache_isolation_tester(lru_cache_1: LruCache, lru_cache_2: LruCache) {
         cache_put!(lru_cache_1, "1", vec![1].into());
         cache_put!(lru_cache_2, "2", vec![2].into());
         assert_eq!(lru_cache_1.get_total_size(), 1);
@@ -858,6 +1040,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lru_redis_cache_isolation() {
+        let lru_cache_1 = new_lru_redis_cache!(
+            &format!("{}/{}", TEST_CACHE_DIR, "1"),
+            3,
+            new_redis_client(),
+            "cache_isolation_1"
+        );
+        let lru_cache_2 = new_lru_redis_cache!(
+            &format!("{}/{}", TEST_CACHE_DIR, "2"),
+            3,
+            new_redis_client(),
+            "cache_isolation_2"
+        );
+        lru_cache_isolation_tester(lru_cache_1, lru_cache_2).await;
+    }
+
+    #[tokio::test]
+    async fn lru_sled_cache_isolation() {
+        let cache1 = new_lru_sled_cache!(
+            &format!("{}/sled/{}", TEST_CACHE_DIR, "1"),
+            3,
+            "cache_isolation_1"
+        );
+        let cache2 = new_lru_sled_cache!(
+            &format!("{}/sled/{}", TEST_CACHE_DIR, "2"),
+            3,
+            "cache_isolation_2"
+        );
+        lru_cache_isolation_tester(cache1, cache2).await;
+    }
+
+    #[tokio::test]
+    async fn lru_sled_cache_concurrency() {
+        let cache = new_lru_sled_cache!(
+            &format!("{}/sled/{}", TEST_CACHE_DIR, "concurrency"),
+            2,
+            "cache_concurrency"
+        );
+        let arc_cache = Arc::new(cache);
+        let mut threads = Vec::new();
+        for _ in 0..256 {
+            let cache = arc_cache.clone();
+            threads.push(tokio::spawn(async move {
+                &cache.put("k1", vec![1].into()).await;
+                &cache.put("k2", vec![2].into()).await;
+                &cache.put("k3", vec![3].into()).await;
+                &cache.put("k4", vec![4].into()).await;
+            }));
+        }
+        for t in threads {
+            t.await.unwrap();
+        }
+        assert_eq!(arc_cache.get_total_size(), 2);
+    }
+
+    #[tokio::test]
     async fn cache_stream_size_valid() {
         let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 3, new_redis_client(), "stream_cache");
         let bytes: Bytes = Bytes::from(vec![1, 1, 4]);
@@ -868,8 +1106,6 @@ mod tests {
         assert_eq!(size, 3);
     }
 
-    // TODO: add test case for ttl
-    // add test cases for rocks db
     #[tokio::test]
     async fn test_ttl_redis_cache() {
         setup();

@@ -9,14 +9,15 @@ run:
 test:
 	docker stop redis_test || return 0
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
-	cargo test $(ARGS)
+	rm -r cache || return 0
+	RUST_BACKTRACE=1 cargo test $(ARGS)
 	docker stop redis_test
 
 dev:
 	cargo watch -d 2 -w src -w Cargo.toml -x "run -- -c config.yml"
 
 dev_clear:
-	rm -rf cache/* 
+	rm -rf cache/* || return 0
 	docker stop redis_dev || return 0
 	docker run --name redis_dev -d --network host --rm redis
 	cargo watch -d 2 -i cache -x run
