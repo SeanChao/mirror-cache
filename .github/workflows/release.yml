@@ -1,0 +1,89 @@
+name: Test
+on:
+  push:
+    branches:
+      - release
+    tags:
+      - "v*"
+
+jobs:
+  style:
+    name: Check Style
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: Install rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+          profile: minimal
+          override: true
+
+      - name: cargo fmt -- --check
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.9]
+        node-version: [15.x]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v2
+        with:
+          node-version: ${{ matrix.node-version }}
+      # cache cargo dependencies
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cargo Test
+        run: |
+          make test
+      - name: mirror test
+        run: |
+          npm install -g zx
+          make redis
+          cargo run &
+          make scenario_test
+          kill %1
+          make redis_stop
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs:
+      - style
+      - test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v1
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release
+      - uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifacts: "target/release/mirror-cache"
+          token: ${{ secrets.GITHUB_TOKEN }}
