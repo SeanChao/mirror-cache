@@ -55,8 +55,8 @@ policies:
     type: TTL
     metadata_db: sled
     path: "cache/ttl"
-    timeout: 3
-    clean_interval: 60 # TTL cache cleanup interval, for sled only
+    timeout: 60
+    clean_interval: 10 # TTL cache cleanup interval, for sled only
   - name: policy_lru
     type: LRU
     metadata_db: sled

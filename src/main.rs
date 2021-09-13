@@ -47,7 +47,6 @@ lazy_static::lazy_static! {
 #[tokio::main]
 async fn main() {
     let matches = App::new("mirror-cache")
-        .version("0.1.0")
         .arg(
             Arg::with_name("config")
                 .short("c")

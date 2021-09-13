@@ -19,9 +19,6 @@ A reverse proxy supporting multiple cache policies, customized rules, configurat
 
 ## Quick start
 
-First, start a [Redis](https://redis.io/) instance and update the connection string in config (`redis.url`).
-For quick start, you may use this command to start a redis server in Docker: `make redis`.
-
 Run the app:
 
 ```sh

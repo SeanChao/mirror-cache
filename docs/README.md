@@ -11,6 +11,13 @@ See [config-rs](https://github.com/mehcode/config-rs) for supported formats.
 
 Exporting environment variables can override settings in the config file. All environment variables should be prefixed with `APP_`, Eg: `export APP_PORT=2333` overrides the `port` field to `2333`.
 
+You may also use command line arguments.
+
+```text
+OPTIONS:
+    -c, --config <FILE>    Sets a custom config file. Default config.yml
+```
+
 #### Data type
 
 The type of `size` in the config file is string. E.g: `1000` (B), `42 KB`, `2.33 MB`, `666 GiB`.
@@ -29,6 +36,10 @@ The type of `size` in the config file is string. E.g: `1000` (B), `42 KB`, `2.33
 
 `url` is the Redis connection string.
 
+#### Sled
+
+`metadata_path`: specifies the path to store sled disk file.
+
 #### Rules
 
 Rules are an array of customized proxy rules.
@@ -44,23 +55,28 @@ Rules are an array of customized proxy rules.
 
 Policies are an array of customized cache policies.
 
-- name: the unique name of the policy
-- type: the type of the policy, see [Cache Policies](#cache-policies) for details
-- path: the path of cached data
+- `name`: the unique name of the policy
+- `type`: the type of the policy, see [Cache Policies](#cache-policies) for details
+- `path`: the path of cached data
+- `metadata_db`: the metadata database to use: `redis` or `sled`. See [Cache Policies](#cache-policies) for details
 
 ### Hot reloading
 
-Any changes on `config.yml` will trigger a configuration reload after a delay of 2 secs.
+Any changes on the configuration file will trigger a configuration reload after a delay of 2 secs.
 
 Note that some configurations like `port` and `log_level` cannot be updated.
 
 ## Cache Policies
 
-### Lru Redis Cache
+Cache policies are implemented on top of metadata database. Currently [Redis](https://redis.io) and [Sled](https://github.com/spacejam/sled) are supported.
+
+### LRU
 
 In config: `type: LRU`
 
-`LruRedisCache` is a cache policy that limits the total **disk space usage**. All files are cached to the local filesystem.
+Supported `metadata_db`: `redis`, `sled`
+
+LRU is a cache policy that limits the total **disk space usage**. All files are cached to the local filesystem.
 
 If the size of all cached files exceeds specied limit, the program will evict a cache entry base on **least recent used (LRU)** policy.
 Every time a file is accessed, its access time is updated to a newer one. Those cache entries with lease recent access time are evicted until we have enough space for the new cache entry.
@@ -68,13 +84,20 @@ Every time a file is accessed, its access time is updated to a newer one. Those 
 Avaliable options in `policy`:
 - `size`: the maximum size of the space usage.
 
-### TTL Redis Cache
+### TTL
 
 In config: `type: TTL`
 
-> Note: To use this cache policy, please enable redis keyspace notifications and enable notifications for key expirations, that is: `notify-keyspace-events Kx`. See [redis.conf](../redis.conf) for reference.
+Supported `metadata_db`: `redis`, `sled`
 
-`TtlRedisCache` is a simple cache policy based on "time to live (TTL)". When an entry is cached, the entry is only valid within the given TTL. After TTL, the cache entry will be evicted.
+TTL stands for "time to live". When an entry is cached, the entry is only valid within the given TTL. After TTL, the cache entry will be evicted.
+
+Avaliable options in `policy`:
+- timeout: The TTL in seconds.
+
+#### Redis Caveats
+
+> Note: To use this cache policy, please enable redis keyspace notifications and enable notifications for key expirations, that is: `notify-keyspace-events Kx`. See [redis.conf](../redis.conf) for reference.
 
 The policy is implemented on top of the redis command `EXPIRE`.
 A cache hit happens if the program can `GET` cache key from redis. Otherwise a cache miss happens, and the program then `put` the cache entry.
@@ -82,8 +105,9 @@ A cache entry `put` is composed of two redis operations: `SET` the cache key and
 
 If a key expiration notification is published while the program is not running, some cache data may not be removed from storage. You may need to manually remove them based on the TTL you configured.
 
-Avaliable options in `policy`:
-- timeout: The TTL in seconds.
+#### Sled Caveats
+
+In sled implementation of the cache, expired cache entries are cleaned periodically with specified interval (`clean_interval` in policy).
 
 ## Metrics
 

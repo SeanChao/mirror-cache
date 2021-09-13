@@ -723,7 +723,7 @@ impl TtlMetadataStore for SledMetadataDb {
                         }
                         Err(e) => {
                             warn!(
-                                "Failed to remove {}: {}. Please clean it manually.",
+                                "Failed to remove {}: {}.",
                                 &key, e
                             );
                         }
@@ -905,6 +905,18 @@ mod tests {
                     $redis_client,
                     $id.to_string(),
                 ))),
+                Storage::FileSystem {
+                    root_dir: $dir.to_string(),
+                },
+            )
+        };
+    }
+
+    macro_rules! new_ttl_sled_cache {
+        ($dir: expr, $ttl: expr, $id: expr, $interval:expr) => {
+            TtlCache::new(
+                $ttl,
+                Arc::new(Box::new(SledMetadataDb::new_ttl($dir, $id, $interval))),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
@@ -1180,12 +1192,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ttl_redis_cache() {
+    async fn test_ttl_redis_cache_expire_key() {
         setup();
         let cache = new_ttl_redis_cache!(TEST_CACHE_DIR, 1, new_redis_client(), "ttl_simple");
         cache_put!(cache, "key", vec![1].into());
         assert_eq!(cache_get!(cache, "key").unwrap().to_vec().await, vec![1]);
-        util::sleep_ms(5000);
+        util::sleep_ms(4000);
+        assert!(cache_get!(cache, "key").is_none());
+    }
+
+    #[tokio::test]
+    async fn ttl_sled_cache_expire_key() {
+        setup();
+        let cache = new_ttl_sled_cache!(&format!("{}/sled_no_dup", TEST_CACHE_DIR), 1, "ttl_sled_no_dup", 0);
+        cache_put!(cache, "key", vec![1].into());
+        assert_eq!(cache_get!(cache, "key").unwrap().to_vec().await, vec![1]);
+        util::sleep_ms(1000);
         assert!(cache_get!(cache, "key").is_none());
     }
 }
