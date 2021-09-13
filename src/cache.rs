@@ -11,7 +11,7 @@ use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
 use redis;
 use redis::Commands;
-use sled::transaction::TransactionResult;
+use sled::transaction::{TransactionError, TransactionResult};
 use sled::Transactional;
 use std::convert::AsRef;
 use std::convert::TryInto;
@@ -95,7 +95,7 @@ impl fmt::Debug for CacheData {
     }
 }
 
-/// CachePolicy is a trait that defines the shared behaviors of all cache policies.
+/// Cache is a trait that defines the shared behaviors of all cache policies.
 /// - `put`: put a key-value pair into the cache
 /// - `get`: get a value from the cache
 #[async_trait]
@@ -104,6 +104,7 @@ pub trait Cache: Sync + Send {
     async fn get(&self, key: &str) -> Option<CacheData>;
 }
 
+/// `LruMetadataStore` defines required behavior for an LRU cache
 pub trait LruMetadataStore: Sync + Send {
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss;
     fn set_lru_entry(&self, key: &str, value: &CacheData);
@@ -112,6 +113,7 @@ pub trait LruMetadataStore: Sync + Send {
     fn get_total_size(&self) -> u64;
 }
 
+/// `TtlMetadataStore` defines required behavior for a TTL cache
 pub trait TtlMetadataStore: Sync + Send {
     fn get_ttl_entry(&self, key: &str) -> CacheHitMiss;
     fn set_ttl_entry(&self, key: &str, value: &CacheData, ttl: u64);
@@ -122,6 +124,7 @@ pub trait TtlMetadataStore: Sync + Send {
     ) -> Result<JoinHandle<()>>;
 }
 
+/// Wrapper of an LRU cache object
 pub struct LruCache {
     pub size_limit: u64,
     metadata_db: Arc<Box<dyn LruMetadataStore>>,
@@ -569,7 +572,7 @@ impl SledMetadataDb {
 ///
 impl LruMetadataStore for SledMetadataDb {
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss {
-        let tx_result: sled::transaction::TransactionResult<_, ()> =
+        let tx_result: TransactionResult<_, TransactionError> =
             (&self.metadata_tree, &self.atime_tree).transaction(|(metadata_tree, atime_tree)| {
                 match metadata_tree.get(key) {
                     Ok(Some(_)) => {
@@ -586,34 +589,44 @@ impl LruMetadataStore for SledMetadataDb {
                     _ => Ok(CacheHitMiss::Miss),
                 }
             });
-        tx_result.unwrap()
+        match tx_result {
+            Ok(hit_miss) => hit_miss,
+            Err(e) => {
+                error!("Failed to get_lru_entry: {}", e);
+                CacheHitMiss::Miss
+            }
+        }
     }
 
     fn set_lru_entry(&self, key: &str, value: &CacheData) {
         let atime = util::now_nanos();
         let db_tree: &sled::Tree = &self.db;
-        (db_tree, &self.metadata_tree, &self.atime_tree)
-            .transaction(|(db, metadata_tree, atime_tree)| {
-                models::sled_insert_cache_entry(
-                    db,
-                    &self.cf,
-                    metadata_tree,
-                    atime_tree,
-                    key,
-                    value.len() as u64,
-                    atime,
-                );
-                models::sled_lru_set_current_size(
-                    db,
-                    &self.cf,
-                    models::sled_lru_get_current_size(db, &self.cf) + value.len() as u64,
-                );
-                if false {
-                    return Err(sled::transaction::ConflictableTransactionError::Abort(()));
-                }
-                Ok(())
-            })
-            .unwrap();
+        let tx_result: TransactionResult<_, TransactionError> =
+            (db_tree, &self.metadata_tree, &self.atime_tree).transaction(
+                |(db, metadata_tree, atime_tree)| {
+                    models::sled_insert_cache_entry(
+                        db,
+                        &self.cf,
+                        metadata_tree,
+                        atime_tree,
+                        key,
+                        value.len() as u64,
+                        atime,
+                    );
+                    models::sled_lru_set_current_size(
+                        db,
+                        &self.cf,
+                        models::sled_lru_get_current_size(db, &self.cf) + value.len() as u64,
+                    );
+                    Ok(())
+                },
+            );
+        match tx_result {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Failed to set_lru_entry: {}", e);
+            }
+        };
     }
 
     /// Run eviction policy if needed, reserve at least `size` for new cache entry.
@@ -624,32 +637,47 @@ impl LruMetadataStore for SledMetadataDb {
         let atime_tree = &self.atime_tree;
         let metadata_tree = &self.metadata_tree;
         while models::sled_lru_get_current_size_notx(db, prefix) + evict_size > size_limit {
-            let atime_tree_val = atime_tree.first().unwrap().unwrap();
-            // An eviction is atomic
-            let _tx_result: sled::transaction::TransactionResult<_, ()> = (
-                default_tree,
-                atime_tree,
-                metadata_tree,
-            )
-                .transaction::<_, _>(|(db, atime_tree, metadata_tree)| {
-                    let filename: &str = std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
-                    match storage.remove(filename) {
-                        Ok(_) => {
-                            increment_counter!(metric::CNT_RM_FILES);
-                            info!("LRU sled cache removed {}", &filename);
-                        }
-                        Err(e) => {
-                            warn!("failed to remove file: {:?}", e);
-                        }
-                    }
-                    let entry: SledMetadata = metadata_tree.get(filename).unwrap().unwrap().into();
-                    let file_size = entry.size;
-                    let cache_size = models::sled_lru_get_current_size(db, prefix) - file_size;
-                    models::sled_lru_set_current_size(db, prefix, cache_size);
-                    metadata_tree.remove(filename).unwrap();
-                    atime_tree.remove(&atime_tree_val.0).unwrap();
-                    Ok(())
-                });
+            // read a possible eviction candidate, multiple threads may read the same one
+            match atime_tree.first() {
+                Ok(Some(atime_tree_val)) => {
+                    // An eviction is atomic
+                    let _tx_result: sled::transaction::TransactionResult<_, ()> =
+                        (default_tree, atime_tree, metadata_tree).transaction::<_, _>(
+                            |(db, atime_tree, metadata_tree)| {
+                                match atime_tree.get(&atime_tree_val.0) {
+                                    Ok(Some(_)) => {
+                                        // transactions in sled are serializable, continue
+                                    }
+                                    _ => {
+                                        // some other thread would remove the entry
+                                        return Ok(());
+                                    }
+                                }
+                                let filename: &str =
+                                    std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
+                                match storage.remove(filename) {
+                                    Ok(_) => {
+                                        increment_counter!(metric::CNT_RM_FILES);
+                                        info!("LRU sled cache removed {}", &filename);
+                                    }
+                                    Err(e) => {
+                                        warn!("failed to remove file: {:?}", e);
+                                    }
+                                }
+                                let entry: SledMetadata =
+                                    metadata_tree.get(filename).unwrap().unwrap().into();
+                                let file_size = entry.size;
+                                let cache_size =
+                                    models::sled_lru_get_current_size(db, prefix) - file_size;
+                                models::sled_lru_set_current_size(db, prefix, cache_size);
+                                metadata_tree.remove(filename).unwrap();
+                                atime_tree.remove(&atime_tree_val.0).unwrap();
+                                Ok(())
+                            },
+                        );
+                }
+                _ => {}
+            }
         }
     }
 

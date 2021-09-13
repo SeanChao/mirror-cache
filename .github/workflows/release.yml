@@ -1,8 +1,6 @@
-name: Test
+name: Release
 on:
   push:
-    branches:
-      - release
     tags:
       - "v*"
 
@@ -70,7 +68,7 @@ jobs:
           make redis_stop
 
   release:
-    name: Release
+    name: GitHub Releases
     runs-on: ubuntu-latest
     needs:
       - style
