@@ -722,10 +722,7 @@ impl TtlMetadataStore for SledMetadataDb {
                             info!("TTL cache removed {}", &key);
                         }
                         Err(e) => {
-                            warn!(
-                                "Failed to remove {}: {}.",
-                                &key, e
-                            );
+                            warn!("Failed to remove {}: {}.", &key, e);
                         }
                     }
                 });
@@ -1204,7 +1201,12 @@ mod tests {
     #[tokio::test]
     async fn ttl_sled_cache_expire_key() {
         setup();
-        let cache = new_ttl_sled_cache!(&format!("{}/sled_no_dup", TEST_CACHE_DIR), 1, "ttl_sled_no_dup", 0);
+        let cache = new_ttl_sled_cache!(
+            &format!("{}/sled_no_dup", TEST_CACHE_DIR),
+            1,
+            "ttl_sled_no_dup",
+            0
+        );
         cache_put!(cache, "key", vec![1].into());
         assert_eq!(cache_get!(cache, "key").unwrap().to_vec().await, vec![1]);
         util::sleep_ms(1000);
