@@ -866,8 +866,7 @@ mod tests {
                     .init();
             };
         };
-        #[allow(clippy::all)]
-        &LOGGER;
+        let _ = &LOGGER;
     }
 
     fn new_redis_client() -> redis::Client {
@@ -897,10 +896,7 @@ mod tests {
         ($dir: expr, $size: expr, $redis_client: expr, $id: expr) => {
             LruCache::new(
                 $size,
-                Arc::new(Box::new(RedisMetadataDb::new(
-                    $redis_client,
-                    $id.to_string(),
-                ))),
+                Arc::new(RedisMetadataDb::new($redis_client, $id.to_string())),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
@@ -913,10 +909,7 @@ mod tests {
         ($dir: expr, $size: expr, $id: expr) => {
             LruCache::new(
                 $size,
-                Arc::new(Box::new(SledMetadataDb::new_lru(
-                    &format!("{}/sled", $dir),
-                    $id,
-                ))),
+                Arc::new(SledMetadataDb::new_lru(&format!("{}/sled", $dir), $id)),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
@@ -929,10 +922,7 @@ mod tests {
         ($dir: expr, $ttl: expr, $redis_client:expr, $id: expr) => {
             TtlCache::new(
                 $ttl,
-                Arc::new(Box::new(RedisMetadataDb::new(
-                    $redis_client,
-                    $id.to_string(),
-                ))),
+                Arc::new(RedisMetadataDb::new($redis_client, $id.to_string())),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
@@ -944,7 +934,7 @@ mod tests {
         ($dir: expr, $ttl: expr, $id: expr, $interval:expr) => {
             TtlCache::new(
                 $ttl,
-                Arc::new(Box::new(SledMetadataDb::new_ttl($dir, $id, $interval))),
+                Arc::new(SledMetadataDb::new_ttl($dir, $id, $interval)),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
