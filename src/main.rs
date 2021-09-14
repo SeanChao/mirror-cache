@@ -141,7 +141,7 @@ fn file_watch_handler(config_filename: &str, result: std::result::Result<Event, 
     }
 }
 
-fn create_re_set_list(rules: &Vec<Rule>) -> (RegexSet, Vec<Regex>) {
+fn create_re_set_list(rules: &[Rule]) -> (RegexSet, Vec<Regex>) {
     let rules_strings: Vec<String> = rules.iter().map(|rule| rule.path.clone()).collect();
     let set = RegexSet::new(&rules_strings).unwrap();
     let list = rules
@@ -157,7 +157,7 @@ fn create_re_set_list(rules: &Vec<Rule>) -> (RegexSet, Vec<Regex>) {
 /// - counter - incoming requests
 /// - counter - successful requests
 /// - counter - failed requests
-fn register_rules_metrics(rules: &Vec<Rule>) {
+fn register_rules_metrics(rules: &[Rule]) {
     for rule in rules {
         register_counter!(metric::COUNTER_CACHE_HIT, "Cache hit count", "rule" => rule_label(rule));
         register_counter!(metric::COUNTER_CACHE_MISS, "Cache miss count", "rule" => rule_label(rule));
@@ -207,7 +207,7 @@ mod handlers {
         let rules_regex_set_list = RE_SET_LIST.read().await;
         let matched_indices: Vec<usize> =
             rules_regex_set_list.0.matches(&path).into_iter().collect();
-        if matched_indices.len() == 0 {
+        if matched_indices.is_empty() {
             // No matching rule
             return Err(warp::reject());
         }

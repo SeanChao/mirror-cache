@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
 use metrics::{histogram, increment_counter, register_histogram};
-use redis;
 use redis::Commands;
 use sled::transaction::{TransactionError, TransactionResult};
 use sled::Transactional;
@@ -87,7 +86,7 @@ impl fmt::Debug for CacheData {
                 &format!(
                     "(stream of size {})",
                     size.map(|x| format!("{}", x))
-                        .unwrap_or("unknown".to_string())
+                        .unwrap_or_else(|| "unknown".to_string())
                 ),
             ),
         };
@@ -232,7 +231,7 @@ impl Cache for TtlCache {
         }
     }
     async fn put(&self, key: &str, mut entry: CacheData) {
-        self.metadata_db.set_ttl_entry(key, &mut entry, self.ttl);
+        self.metadata_db.set_ttl_entry(key, &entry, self.ttl);
         self.storage.persist(key, &mut entry).await;
     }
 }
@@ -267,7 +266,7 @@ impl RedisMetadataDb {
     fn get_metric_key(id: &str) -> String {
         format!("{}_{}", metric::HG_CACHE_SIZE_PREFIX, id)
     }
-    pub fn to_redis_key(id: &str, cache_key: &str) -> String {
+    pub fn get_redis_key(id: &str, cache_key: &str) -> String {
         format!("{}/{}", id, cache_key)
     }
     pub fn from_redis_key(id: &str, key: &str) -> String {
@@ -385,7 +384,7 @@ impl LruMetadataStore for RedisMetadataDb {
 
 impl TtlMetadataStore for RedisMetadataDb {
     fn get_ttl_entry(&self, key: &str) -> CacheHitMiss {
-        let redis_key = Self::to_redis_key(&self.id, key);
+        let redis_key = Self::get_redis_key(&self.id, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         match models::get(&mut sync_con, &redis_key) {
             Ok(res) => match res {
@@ -399,7 +398,7 @@ impl TtlMetadataStore for RedisMetadataDb {
         }
     }
     fn set_ttl_entry(&self, key: &str, _value: &CacheData, ttl: u64) {
-        let redis_key = Self::to_redis_key(&self.id, key);
+        let redis_key = Self::get_redis_key(&self.id, key);
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         match models::set(&mut sync_con, &redis_key, "") {
             Ok(_) => {}
@@ -424,7 +423,7 @@ impl TtlMetadataStore for RedisMetadataDb {
         let cloned_client = self.redis_client.clone();
         let id_clone = self.id.to_string();
         let storage_clone = storage.clone();
-        let pending_close_clone = pending_close.clone();
+        let pending_close_clone = pending_close;
         let expiration_thread_handler = std::thread::spawn(move || {
             debug!("TTL expiration listener is created!");
             loop {
@@ -454,7 +453,7 @@ impl TtlMetadataStore for RedisMetadataDb {
                                 Ok(msg) => {
                                     let channel: String = msg.get_channel().unwrap();
                                     let payload: String = msg.get_payload().unwrap();
-                                    let redis_key = &channel[channel.find(":").unwrap() + 1..];
+                                    let redis_key = &channel[channel.find(':').unwrap() + 1..];
                                     let file = Self::from_redis_key(&id_clone, &redis_key);
                                     trace!(
                                         "channel '{}': payload {}, file: {}",
@@ -638,45 +637,42 @@ impl LruMetadataStore for SledMetadataDb {
         let metadata_tree = &self.metadata_tree;
         while models::sled_lru_get_current_size_notx(db, prefix) + evict_size > size_limit {
             // read a possible eviction candidate, multiple threads may read the same one
-            match atime_tree.first() {
-                Ok(Some(atime_tree_val)) => {
-                    // An eviction is atomic
-                    let _tx_result: sled::transaction::TransactionResult<_, ()> =
-                        (default_tree, atime_tree, metadata_tree).transaction::<_, _>(
-                            |(db, atime_tree, metadata_tree)| {
-                                match atime_tree.get(&atime_tree_val.0) {
-                                    Ok(Some(_)) => {
-                                        // transactions in sled are serializable, continue
-                                    }
-                                    _ => {
-                                        // some other thread would remove the entry
-                                        return Ok(());
-                                    }
+            if let Ok(Some(atime_tree_val)) = atime_tree.first() {
+                // An eviction is atomic
+                let _tx_result: sled::transaction::TransactionResult<_, ()> =
+                    (default_tree, atime_tree, metadata_tree).transaction::<_, _>(
+                        |(db, atime_tree, metadata_tree)| {
+                            match atime_tree.get(&atime_tree_val.0) {
+                                Ok(Some(_)) => {
+                                    // transactions in sled are serializable, continue
                                 }
-                                let filename: &str =
-                                    std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
-                                match storage.remove(filename) {
-                                    Ok(_) => {
-                                        increment_counter!(metric::CNT_RM_FILES);
-                                        info!("LRU sled cache removed {}", &filename);
-                                    }
-                                    Err(e) => {
-                                        warn!("failed to remove file: {:?}", e);
-                                    }
+                                _ => {
+                                    // some other thread would remove the entry
+                                    return Ok(());
                                 }
-                                let entry: SledMetadata =
-                                    metadata_tree.get(filename).unwrap().unwrap().into();
-                                let file_size = entry.size;
-                                let cache_size =
-                                    models::sled_lru_get_current_size(db, prefix) - file_size;
-                                models::sled_lru_set_current_size(db, prefix, cache_size);
-                                metadata_tree.remove(filename).unwrap();
-                                atime_tree.remove(&atime_tree_val.0).unwrap();
-                                Ok(())
-                            },
-                        );
-                }
-                _ => {}
+                            }
+                            let filename: &str =
+                                std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
+                            match storage.remove(filename) {
+                                Ok(_) => {
+                                    increment_counter!(metric::CNT_RM_FILES);
+                                    info!("LRU sled cache removed {}", &filename);
+                                }
+                                Err(e) => {
+                                    warn!("failed to remove file: {:?}", e);
+                                }
+                            }
+                            let entry: SledMetadata =
+                                metadata_tree.get(filename).unwrap().unwrap().into();
+                            let file_size = entry.size;
+                            let cache_size =
+                                models::sled_lru_get_current_size(db, prefix) - file_size;
+                            models::sled_lru_set_current_size(db, prefix, cache_size);
+                            metadata_tree.remove(filename).unwrap();
+                            atime_tree.remove(&atime_tree_val.0).unwrap();
+                            Ok(())
+                        },
+                    );
             }
         }
     }
@@ -710,7 +706,7 @@ impl TtlMetadataStore for SledMetadataDb {
     fn set_ttl_entry(&self, key: &str, _value: &CacheData, ttl: u64) {
         let _tx_result: TransactionResult<_, ()> = (&self.atime_tree, &self.metadata_tree)
             .transaction(|(atime_tree, metadata_tree)| {
-                let expire_time = (util::now_nanos() + ttl as i64 * 1000_000_000).to_be_bytes();
+                let expire_time = (util::now_nanos() + ttl as i64 * 1_000_000_000).to_be_bytes();
                 atime_tree.insert(&expire_time, key).unwrap();
                 metadata_tree.insert(key, &expire_time).unwrap();
                 Ok(())
@@ -724,7 +720,7 @@ impl TtlMetadataStore for SledMetadataDb {
         pending_close: Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>> {
         let storage_clone = storage.clone();
-        let pending_close_clone = pending_close.clone();
+        let pending_close_clone = pending_close;
         let atime_tree = self.atime_tree.clone();
         let metadata_tree = self.metadata_tree.clone();
         let clean_interval = self.clean_interval;
@@ -780,7 +776,7 @@ impl CacheEntry<LruCacheMetadata, String, ()> {
     pub fn new(path: &str, size: u64) -> CacheEntry<LruCacheMetadata, String, ()> {
         CacheEntry {
             metadata: LruCacheMetadata {
-                size: size,
+                size,
                 atime: util::now(),
             },
             key: String::from(path),

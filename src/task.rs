@@ -71,7 +71,7 @@ impl Task {
             Task::Others { url, .. } => url
                 .replace("http://", "http/")
                 .replace("https://", "https/")
-                .trim_end_matches("/")
+                .trim_end_matches('/')
                 .to_string(),
         }
     }
@@ -164,7 +164,7 @@ impl TaskManager {
                             (
                                 Ok(TaskResponse::StreamResponse(Box::pin(
                                     res.bytes_stream()
-                                        .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                                        .map(move |x| x.map_err(Error::RequestError)),
                                 ))),
                                 CacheHitMiss::Miss,
                             )
@@ -229,7 +229,7 @@ impl TaskManager {
 
     fn create_cache_from_rule(
         policy_name: &str,
-        policies: &Vec<Policy>,
+        policies: &[Policy],
         redis_client: Option<redis::Client>,
         sled_metadata_path: &str,
     ) -> Result<Arc<dyn Cache>> {
@@ -334,10 +334,7 @@ impl TaskManager {
         match &task {
             Task::Others { rule_id, .. } => {
                 c = self.get_cache_for_cache_rule(*rule_id).unwrap();
-                rewrites = match self.rewrite_map.get(rule_id) {
-                    Some(rewrites) => Some(rewrites.clone()),
-                    None => None,
-                }
+                rewrites = self.rewrite_map.get(rule_id).cloned()
             }
         };
         let task_clone = task.clone();
@@ -365,8 +362,7 @@ impl TaskManager {
                                 &task_clone.to_key(),
                                 CacheData::ByteStream(
                                     Box::new(
-                                        bytestream
-                                            .map(move |x| x.map_err(|e| Error::RequestError(e))),
+                                        bytestream.map(move |x| x.map_err(Error::RequestError)),
                                     ),
                                     len.map(|x| x as usize),
                                 ),
@@ -409,7 +405,7 @@ impl TaskManager {
         }
     }
 
-    pub fn rewrite_upstream(content: String, rewrites: &Vec<Rewrite>) -> String {
+    pub fn rewrite_upstream(content: String, rewrites: &[Rewrite]) -> String {
         let mut content = content;
         for rewrite in rewrites {
             content = content.replace(&rewrite.from, &rewrite.to);
@@ -424,10 +420,7 @@ impl TaskManager {
     }
 
     pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn Cache>> {
-        match self.rule_map.get(&rule_id) {
-            Some(tuple) => Some(tuple.0.clone()),
-            None => None,
-        }
+        self.rule_map.get(&rule_id).map(|tuple| tuple.0.clone())
     }
 
     pub fn get_task_size_limit(&self, task: &Task) -> usize {

@@ -6,7 +6,7 @@ use futures::StreamExt;
 use futures::{Stream, TryStreamExt};
 use std::fs;
 use std::io::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
 use tokio::io::BufReader;
 use tokio_util::codec;
@@ -34,7 +34,7 @@ pub enum Storage {
     FileSystem { root_dir: String },
 }
 
-pub async fn get_file_stream(path: &PathBuf) -> Result<impl Stream<Item = Result<Bytes>>> {
+pub async fn get_file_stream(path: &Path) -> Result<impl Stream<Item = Result<Bytes>>> {
     let f = OpenOptions::default().read(true).open(path).await?;
     let f = BufReader::new(f);
     let stream = codec::FramedRead::new(f, codec::BytesCodec::new())

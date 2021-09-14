@@ -134,7 +134,9 @@ impl Settings {
 }
 
 pub fn rule_label(rule: &Rule) -> String {
-    rule.name.clone().unwrap_or("unnamed_rules".to_string())
+    rule.name
+        .clone()
+        .unwrap_or_else(|| "unnamed_rules".to_string())
 }
 
 #[cfg(test)]

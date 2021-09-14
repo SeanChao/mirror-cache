@@ -4,7 +4,6 @@ use crate::error::Error::*;
 use crate::error::Result;
 use redis::{aio::Connection, Commands, Connection as SyncConnection};
 use sled::transaction::TransactionalTree;
-use sled::IVec;
 use std::collections::HashMap;
 use std::convert::{From, TryInto};
 
@@ -13,13 +12,11 @@ pub async fn get_con(client: &redis::Client) -> Result<Connection> {
     client
         .get_async_connection()
         .await
-        .map_err(|e| RedisClientError(e).into())
+        .map_err(RedisClientError)
 }
 
 pub fn get_sync_con(client: &redis::Client) -> Result<SyncConnection> {
-    client
-        .get_connection()
-        .map_err(|e| RedisClientError(e).into())
+    client.get_connection().map_err(RedisClientError)
 }
 
 /// get cache entry
@@ -73,7 +70,7 @@ pub fn set_lru_cache_entry(
         .query(con)?;
         Ok(Some(()))
     });
-    tx_result.map_err(|e| RedisCMDError(e))
+    tx_result.map_err(RedisCMDError)
 }
 
 pub fn update_cache_entry_atime(
@@ -131,9 +128,9 @@ impl From<sled::IVec> for SledMetadata {
     }
 }
 
-impl Into<IVec> for SledMetadata {
-    fn into(self) -> IVec {
-        [self.atime.to_be_bytes(), self.size.to_be_bytes()]
+impl From<SledMetadata> for sled::IVec {
+    fn from(metadata: SledMetadata) -> Self {
+        [metadata.atime.to_be_bytes(), metadata.size.to_be_bytes()]
             .concat()
             .into()
     }
@@ -236,6 +233,7 @@ pub fn sled_lru_set_current_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sled::IVec;
     use std::thread;
 
     fn new_redis_client() -> redis::Client {
