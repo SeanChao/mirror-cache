@@ -39,7 +39,12 @@ pub fn register_counters() {
     );
     register_histogram!(
         HG_TASKS_LEN,
-        "The current size of background download task set."
+        metrics::Unit::Count,
+        "The current size of background download task set.",
     );
     register_counter!(CNT_RM_FILES, "The number of removed files.");
+}
+
+pub fn get_cache_size_metrics_key(id: &str) -> String {
+    format!("{}_{}", HG_CACHE_SIZE_PREFIX, id)
 }

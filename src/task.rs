@@ -115,7 +115,7 @@ impl TaskManager {
         let key = task.to_key();
         match &task {
             Task::Others { .. } => {
-                if let Some(bytes) = self.get(&task, &key).await {
+                if let Some(bytes) = self.get(task, &key).await {
                     cache_result = Some(bytes);
                 }
             }
@@ -127,7 +127,7 @@ impl TaskManager {
         increment_counter!(metric::COUNTER_CACHE_MISS);
         // cache miss
         // fetch from upstream
-        let remote_url = self.resolve_task_upstream(&task);
+        let remote_url = self.resolve_task_upstream(task);
         info!(
             "[Request] [MISS] {:?}, fetching from upstream: {}",
             &task, &remote_url
@@ -140,7 +140,7 @@ impl TaskManager {
                 }
                 // if the response is too large, respond users with a redirect to upstream
                 if let Some(content_length) = res.content_length() {
-                    let size_limit = self.get_task_size_limit(&task);
+                    let size_limit = self.get_task_size_limit(task);
                     if size_limit != 0 && size_limit < content_length as usize {
                         return (
                             Ok(TaskResponse::Redirect(warp::reply::with_header(
@@ -158,8 +158,8 @@ impl TaskManager {
                     Task::Others { rule_id, .. } => {
                         if let Some(rewrite_rules) = self.rewrite_map.get(rule_id) {
                             let text = res.text().await.unwrap();
-                            let content = Self::rewrite_upstream(text, &rewrite_rules);
-                            return (Ok(content.into()), CacheHitMiss::Miss);
+                            let content = Self::rewrite_upstream(text, rewrite_rules);
+                            (Ok(content.into()), CacheHitMiss::Miss)
                         } else {
                             (
                                 Ok(TaskResponse::StreamResponse(Box::pin(
@@ -201,7 +201,7 @@ impl TaskManager {
         // create cache for each policy
         for policy in &policy_map {
             let cache = Self::create_cache_from_rule(
-                &policy,
+                policy,
                 &policies,
                 Some(redis_client.clone()),
                 &app_settings.sled.metadata_path,
@@ -242,10 +242,10 @@ impl TaskManager {
                     (PolicyType::Lru, MetadataDb::Redis) => {
                         return Ok(Arc::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
-                            Arc::new(Box::new(RedisMetadataDb::new(
+                            Arc::new(RedisMetadataDb::new(
                                 redis_client.unwrap(),
                                 format!("lru_rule_{}", idx),
-                            ))),
+                            )),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
@@ -256,10 +256,10 @@ impl TaskManager {
                         let id = format!("lru_rule_{}", idx);
                         return Ok(Arc::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
-                            Arc::new(Box::new(SledMetadataDb::new_lru(
+                            Arc::new(SledMetadataDb::new_lru(
                                 &format!("{}/{}", sled_metadata_path, &id),
                                 &id,
-                            ))),
+                            )),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
@@ -269,10 +269,10 @@ impl TaskManager {
                     (PolicyType::Ttl, MetadataDb::Redis) => {
                         return Ok(Arc::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
-                            Arc::new(Box::new(RedisMetadataDb::new(
+                            Arc::new(RedisMetadataDb::new(
                                 redis_client.unwrap(),
                                 format!("ttl_rule_{}", idx),
-                            ))),
+                            )),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
@@ -282,11 +282,11 @@ impl TaskManager {
                         let id = format!("ttl_rule_{}", policy_ident);
                         return Ok(Arc::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
-                            Arc::new(Box::new(SledMetadataDb::new_ttl(
+                            Arc::new(SledMetadataDb::new_ttl(
                                 &format!("{}/{}", sled_metadata_path, &id),
                                 &id,
                                 p.clean_interval.unwrap(),
-                            ))),
+                            )),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
@@ -425,7 +425,7 @@ impl TaskManager {
 
     pub fn get_task_size_limit(&self, task: &Task) -> usize {
         match task {
-            Task::Others { rule_id, .. } => self.rule_map.get(&rule_id).unwrap().1,
+            Task::Others { rule_id, .. } => self.rule_map.get(rule_id).unwrap().1,
         }
     }
 }
@@ -436,15 +436,16 @@ mod test {
 
     #[test]
     fn rewrite_upstream() {
-        let mut rewrites = Vec::new();
-        rewrites.push(Rewrite {
-            from: "flower".to_string(),
-            to: "vegetable".to_string(),
-        });
-        rewrites.push(Rewrite {
-            from: "cat".to_string(),
-            to: "dog".to_string(),
-        });
+        let rewrites = vec![
+            Rewrite {
+                from: "flower".to_string(),
+                to: "vegetable".to_string(),
+            },
+            Rewrite {
+                from: "cat".to_string(),
+                to: "dog".to_string(),
+            },
+        ];
         assert_eq!(
             TaskManager::rewrite_upstream("flower cat".to_string(), &rewrites),
             "vegetable dog"

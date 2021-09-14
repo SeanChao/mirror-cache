@@ -126,27 +126,26 @@ pub trait TtlMetadataStore: Sync + Send {
 /// Wrapper of an LRU cache object
 pub struct LruCache {
     pub size_limit: u64,
-    metadata_db: Arc<Box<dyn LruMetadataStore>>,
+    metadata_db: Arc<dyn LruMetadataStore>,
     storage: Storage,
 }
 
 impl LruCache {
     pub fn new(
         size_limit: u64,
-        metadata_db: Arc<Box<dyn LruMetadataStore>>,
+        metadata_db: Arc<dyn LruMetadataStore>,
         storage: Storage,
         metric_id: String,
     ) -> Self {
-        register_histogram!(Self::get_metric_key(&metric_id));
+        register_histogram!(
+            metric::get_cache_size_metrics_key(&metric_id),
+            metrics::Unit::Bytes,
+        );
         Self {
             size_limit,
             metadata_db,
             storage,
         }
-    }
-
-    fn get_metric_key(id: &str) -> String {
-        format!("{}_{}", metric::HG_CACHE_SIZE_PREFIX, id)
     }
 }
 
@@ -156,7 +155,10 @@ impl Cache for LruCache {
         let file_size = entry.len() as u64;
 
         if file_size > self.size_limit {
-            info!("skip cache for {}, because its size exceeds the limit", key);
+            info!(
+                "skip cache for {}, because its size exceeds cache size limit({})",
+                key, self.size_limit
+            );
         }
         // Run eviction, set new entry
         self.metadata_db
@@ -187,14 +189,14 @@ impl Cache for LruCache {
 
 pub struct TtlCache {
     pub ttl: u64,
-    metadata_db: Arc<Box<dyn TtlMetadataStore>>,
+    metadata_db: Arc<dyn TtlMetadataStore>,
     storage: Storage,
     pub pending_close: Arc<AtomicBool>,
     pub expiration_thread_handler: Option<JoinHandle<()>>,
 }
 
 impl TtlCache {
-    pub fn new(ttl: u64, metadata_db: Arc<Box<dyn TtlMetadataStore>>, storage: Storage) -> Self {
+    pub fn new(ttl: u64, metadata_db: Arc<dyn TtlMetadataStore>, storage: Storage) -> Self {
         let mut cache = Self {
             ttl,
             metadata_db,
@@ -263,16 +265,16 @@ impl RedisMetadataDb {
     fn entries_zlist_key(&self) -> String {
         self.to_prefixed_key("cache_keys")
     }
-    fn get_metric_key(id: &str) -> String {
-        format!("{}_{}", metric::HG_CACHE_SIZE_PREFIX, id)
-    }
+
     pub fn get_redis_key(id: &str, cache_key: &str) -> String {
         format!("{}/{}", id, cache_key)
     }
+
     pub fn from_redis_key(id: &str, key: &str) -> String {
         String::from(&key[id.len() + 1..])
     }
 }
+
 impl LruMetadataStore for RedisMetadataDb {
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss {
         let redis_key = &self.to_prefixed_key(key);
@@ -307,10 +309,10 @@ impl LruMetadataStore for RedisMetadataDb {
     fn set_lru_entry(&self, key: &str, value: &CacheData) {
         let redis_key = &self.to_prefixed_key(key);
         let mut con = models::get_sync_con(&self.redis_client).unwrap();
-        let entry = &CacheEntry::new(&redis_key, value.len() as u64);
+        let entry = &CacheEntry::new(redis_key, value.len() as u64);
         let _redis_resp_str = models::set_lru_cache_entry(
             &mut con,
-            &redis_key,
+            redis_key,
             entry,
             &self.total_size_key(),
             &self.entries_zlist_key(),
@@ -373,11 +375,12 @@ impl LruMetadataStore for RedisMetadataDb {
             },
         );
     }
+
     fn get_total_size(&self) -> u64 {
         let key = self.total_size_key();
         let mut con = self.redis_client.get_connection().unwrap();
         let size = con.get::<&str, Option<u64>>(&key).unwrap().unwrap_or(0);
-        histogram!(Self::get_metric_key(&self.id), size as f64);
+        histogram!(metric::get_cache_size_metrics_key(&self.id), size as f64);
         size
     }
 }
@@ -454,7 +457,7 @@ impl TtlMetadataStore for RedisMetadataDb {
                                     let channel: String = msg.get_channel().unwrap();
                                     let payload: String = msg.get_payload().unwrap();
                                     let redis_key = &channel[channel.find(':').unwrap() + 1..];
-                                    let file = Self::from_redis_key(&id_clone, &redis_key);
+                                    let file = Self::from_redis_key(&id_clone, redis_key);
                                     trace!(
                                         "channel '{}': payload {}, file: {}",
                                         msg.get_channel_name(),
@@ -612,10 +615,12 @@ impl LruMetadataStore for SledMetadataDb {
                         value.len() as u64,
                         atime,
                     );
-                    models::sled_lru_set_current_size(
-                        db,
-                        &self.cf,
-                        models::sled_lru_get_current_size(db, &self.cf) + value.len() as u64,
+                    let current_size =
+                        models::sled_lru_get_current_size(db, &self.cf) + value.len() as u64;
+                    models::sled_lru_set_current_size(db, &self.cf, current_size);
+                    histogram!(
+                        metric::get_cache_size_metrics_key(&self.cf),
+                        current_size as f64
                     );
                     Ok(())
                 },
@@ -659,7 +664,7 @@ impl LruMetadataStore for SledMetadataDb {
                                     info!("LRU sled cache removed {}", &filename);
                                 }
                                 Err(e) => {
-                                    warn!("failed to remove file: {:?}", e);
+                                    warn!("failed to remove file {}: {:?}", filename, e);
                                 }
                             }
                             let entry: SledMetadata =
@@ -668,6 +673,10 @@ impl LruMetadataStore for SledMetadataDb {
                             let cache_size =
                                 models::sled_lru_get_current_size(db, prefix) - file_size;
                             models::sled_lru_set_current_size(db, prefix, cache_size);
+                            histogram!(
+                                metric::get_cache_size_metrics_key(&self.cf),
+                                cache_size as f64
+                            );
                             metadata_tree.remove(filename).unwrap();
                             atime_tree.remove(&atime_tree_val.0).unwrap();
                             Ok(())
@@ -733,7 +742,7 @@ impl TtlMetadataStore for SledMetadataDb {
                 let time = util::now_nanos();
                 atime_tree.range(..time.to_be_bytes()).for_each(|e| {
                     let e = e.unwrap();
-                    let key = std::str::from_utf8(&e.1.as_ref()).unwrap();
+                    let key = std::str::from_utf8(e.1.as_ref()).unwrap();
                     let _tx_result: TransactionResult<_, ()> = (&atime_tree, &metadata_tree)
                         .transaction(|(atime_tree, metadata_tree)| {
                             atime_tree.remove(&e.0).unwrap();
@@ -812,7 +821,6 @@ mod tests {
     use futures::stream::{self};
     use futures::StreamExt;
     use lazy_static::lazy_static;
-    use pretty_env_logger;
     use std::fs;
     use std::io;
     use std::io::prelude::*;
@@ -827,7 +835,7 @@ mod tests {
                 CacheData::ByteStream(mut stream, ..) => {
                     let mut v = Vec::new();
                     while let Some(bytes_result) = stream.next().await {
-                        if !bytes_result.is_ok() {
+                        if bytes_result.is_err() {
                             return Vec::new();
                         }
                         v.append(&mut bytes_result.unwrap().to_vec());
@@ -856,16 +864,15 @@ mod tests {
                     .filter_level(log::LevelFilter::Trace)
                     .target(pretty_env_logger::env_logger::Target::Stdout)
                     .init();
-                ()
             };
         };
+        #[allow(clippy::all)]
         &LOGGER;
     }
 
     fn new_redis_client() -> redis::Client {
-        let redis_client = redis::Client::open("redis://localhost:3001/")
-            .expect("Failed to connect to redis server (test)");
-        return redis_client;
+        redis::Client::open("redis://localhost:3001/")
+            .expect("Failed to connect to redis server (test)")
     }
 
     fn get_file_all(path: &str) -> Vec<u8> {
@@ -1021,18 +1028,12 @@ mod tests {
         // cache is full, evict tsu_ki
         cache_put!(lru_cache, "suki", vec![1; 4].into());
         assert_eq!(lru_cache.get_total_size(), 15);
-        assert_eq!(
-            file_not_exist(&format!("{}/{}", cached_path, "tsu_ki")),
-            true
-        );
+        assert!(file_not_exist(&format!("{}/{}", cached_path, "tsu_ki")));
         // evict both suki and kirei
         cache_put!(lru_cache, "deadbeef", vec![2; 16].into());
         assert_eq!(lru_cache.get_total_size(), 16);
-        assert_eq!(
-            file_not_exist(&format!("{}/{}", cached_path, "kirei")),
-            true
-        );
-        assert_eq!(file_not_exist(&format!("{}/{}", cached_path, "suki")), true);
+        assert!(file_not_exist(&format!("{}/{}", cached_path, "kirei")));
+        assert!(file_not_exist(&format!("{}/{}", cached_path, "suki")));
         assert_eq!(
             get_file_all(&format!("{}/{}", cached_path, "deadbeef")),
             vec![2; 16]
@@ -1135,7 +1136,7 @@ mod tests {
         assert_eq!(lru_cache_2.get_total_size(), 1);
         assert_eq!(
             cache_get!(lru_cache_1, "1").unwrap().to_vec().await,
-            vec![1 as u8]
+            vec![1_u8]
         );
         assert!(cache_get!(lru_cache_1, "2").is_none());
         assert!(cache_get!(lru_cache_2, "1").is_none());
@@ -1189,10 +1190,10 @@ mod tests {
         for _ in 0..256 {
             let cache = arc_cache.clone();
             threads.push(tokio::spawn(async move {
-                &cache.put("k1", vec![1].into()).await;
-                &cache.put("k2", vec![2].into()).await;
-                &cache.put("k3", vec![3].into()).await;
-                &cache.put("k4", vec![4].into()).await;
+                cache.put("k1", vec![1].into()).await;
+                cache.put("k2", vec![2].into()).await;
+                cache.put("k3", vec![3].into()).await;
+                cache.put("k4", vec![4].into()).await;
             }));
         }
         for t in threads {

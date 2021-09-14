@@ -67,7 +67,7 @@ impl Storage {
 
     pub async fn persist(&self, name: &str, data: &mut CacheData) {
         match &self {
-            Storage::FileSystem { root_dir, .. } => fs_persist(&root_dir, name, data).await,
+            Storage::FileSystem { root_dir, .. } => fs_persist(root_dir, name, data).await,
         }
     }
 

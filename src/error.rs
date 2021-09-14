@@ -4,6 +4,7 @@ use std::convert::From;
 use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("error parsing string from redis result: {0}")]

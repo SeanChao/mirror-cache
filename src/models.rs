@@ -237,9 +237,8 @@ mod tests {
     use std::thread;
 
     fn new_redis_client() -> redis::Client {
-        let redis_client = redis::Client::open("redis://localhost:3001/")
-            .expect("Failed to connect to redis server (test)");
-        return redis_client;
+        redis::Client::open("redis://localhost:3001/")
+            .expect("Failed to connect to redis server (test)")
     }
 
     #[test]

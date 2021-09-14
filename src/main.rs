@@ -241,7 +241,7 @@ mod handlers {
                     }
                 }
                 increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
-                return Ok(resp);
+                Ok(resp)
             }
             Err(e) => {
                 increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
