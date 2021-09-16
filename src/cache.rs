@@ -1,3 +1,4 @@
+use crate::error::Error;
 use crate::error::Result;
 use crate::metric;
 use crate::models;
@@ -16,6 +17,7 @@ use std::convert::AsRef;
 use std::convert::TryInto;
 use std::fmt;
 use std::marker::Send;
+use std::path::Path;
 use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -94,7 +96,7 @@ impl fmt::Debug for CacheData {
     }
 }
 
-/// Cache is a trait that defines the shared behaviors of all cache policies.
+/// Cache is a trait that defines the shared beshaviors of all cache policies.
 /// - `put`: put a key-value pair into the cache
 /// - `get`: get a value from the cache
 #[async_trait]
@@ -159,6 +161,7 @@ impl Cache for LruCache {
                 "skip cache for {}, because its size exceeds cache size limit({})",
                 key, self.size_limit
             );
+            return;
         }
         // Run eviction, set new entry
         self.metadata_db
@@ -533,7 +536,7 @@ pub struct SledMetadataDb {
 
 impl SledMetadataDb {
     pub fn new_lru(path: &str, cf_name: &str) -> Self {
-        let db = sled::open(path).unwrap();
+        let db = Self::open_db(path).unwrap();
         let metadata_tree = db.open_tree(cf_name).unwrap();
         let atime_tree = db.open_tree(format!("{}_atime_tree", path)).unwrap();
         db.transaction::<_, _, ()>(|tx_db| {
@@ -551,7 +554,7 @@ impl SledMetadataDb {
     }
 
     pub fn new_ttl(path: &str, cf_name: &str, clean_interval: u64) -> Self {
-        let db = sled::open(path).unwrap();
+        let db = Self::open_db(path).unwrap();
         let metadata_tree = db.open_tree(cf_name).unwrap();
         let atime_tree = db.open_tree(format!("{}_atime_tree", path)).unwrap();
         Self {
@@ -561,6 +564,28 @@ impl SledMetadataDb {
             cf: cf_name.to_string(),
             clean_interval,
         }
+    }
+
+    /// Open db, and retry if fails
+    /// Reference: https://github.com/spacejam/sled/issues/1234
+    fn open_db(path: impl AsRef<Path>) -> Result<sled::Db> {
+        let mut sled_error = Error::OtherError("Unknown error: sled not initialized".into());
+        for retry_attempt in 0..10 {
+            match sled::open(&path) {
+                Ok(db) => return Ok(db),
+                Err(e) => {
+                    warn!(
+                        "{}/10 Failed to open sled db at {}: {}",
+                        retry_attempt + 1,
+                        path.as_ref().display(),
+                        e
+                    );
+                    sled_error = Error::SledOpenFailed(e);
+                }
+            }
+            util::sleep_ms(1000);
+        }
+        Err(sled_error)
     }
 }
 

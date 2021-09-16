@@ -82,7 +82,7 @@ pub type RuleId = usize;
 #[derive(Clone)]
 pub struct TaskManager {
     pub config: Settings,
-    /// RuleId -> (cache, size_limit)
+    /// RuleId -> (cache, size_limit of payload)
     pub rule_map: HashMap<RuleId, (Arc<dyn Cache>, usize)>,
     /// Specifies how to do the upstream rewrite for RuleId.
     /// RuleId -> Vec<Rewrite>
@@ -196,6 +196,7 @@ impl TaskManager {
 
         // Clear cache here, so that previous cache objects can be dropped
         tm.rule_map.clear();
+        tm.rewrite_map.clear();
         let mut cache_map: HashMap<String, Arc<dyn Cache>> = HashMap::new();
         let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
         // create cache for each policy

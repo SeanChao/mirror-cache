@@ -202,6 +202,7 @@ mod handlers {
 
     pub async fn fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
         // Dynamically dispatch tasks defined in config file
+        println!("TaskManager read acquire.");
         let tm = TASK_MANAGER.read().await.clone();
         let config = &tm.config;
         let rules_regex_set_list = RE_SET_LIST.read().await;
@@ -241,6 +242,7 @@ mod handlers {
                     }
                 }
                 increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
+                println!("TaskManager read release (OK).");
                 Ok(resp)
             }
             Err(e) => {

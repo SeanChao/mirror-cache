@@ -13,6 +13,8 @@ pub enum Error {
     RedisCMDError(redis::RedisError),
     #[error("error creating Redis client: {0}")]
     RedisClientError(redis::RedisError),
+    #[error("failed to open sled db: {0}")]
+    SledOpenFailed(sled::Error),
     #[error("outbound request failed: {0}")]
     RequestError(reqwest::Error),
     #[error("upstream request is not successful: {0:?}")]
@@ -23,6 +25,8 @@ pub enum Error {
     ConfigInvalid(String),
     #[error("{0}")]
     IoError(std::io::Error),
+    #[error("{0}")]
+    OtherError(String),
 }
 
 impl warp::reject::Reject for Error {}
