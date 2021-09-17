@@ -13,8 +13,10 @@ pub enum Error {
     RedisCMDError(redis::RedisError),
     #[error("error creating Redis client: {0}")]
     RedisClientError(redis::RedisError),
-    #[error("failed to open sled db: {0}")]
-    SledOpenFailed(sled::Error),
+    #[error("sled error: {0}")]
+    SledError(sled::Error),
+    #[error("sled transaction error: {0}")]
+    SledUnabortableTransactionError(sled::transaction::UnabortableTransactionError),
     #[error("outbound request failed: {0}")]
     RequestError(reqwest::Error),
     #[error("upstream request is not successful: {0:?}")]
@@ -46,5 +48,11 @@ impl From<ConfigError> for Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Error {
         Error::IoError(e)
+    }
+}
+
+impl From<sled::transaction::UnabortableTransactionError> for Error {
+    fn from(e: sled::transaction::UnabortableTransactionError) -> Error {
+        Error::SledUnabortableTransactionError(e)
     }
 }

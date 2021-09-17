@@ -540,7 +540,7 @@ impl SledMetadataDb {
         let metadata_tree = db.open_tree(cf_name).unwrap();
         let atime_tree = db.open_tree(format!("{}_atime_tree", path)).unwrap();
         db.transaction::<_, _, ()>(|tx_db| {
-            models::sled_lru_set_current_size(tx_db, cf_name, 0);
+            models::sled_try_init_current_size(tx_db, cf_name).unwrap();
             Ok(())
         })
         .unwrap();
@@ -580,7 +580,7 @@ impl SledMetadataDb {
                         path.as_ref().display(),
                         e
                     );
-                    sled_error = Error::SledOpenFailed(e);
+                    sled_error = Error::SledError(e);
                 }
             }
             util::sleep_ms(1000);
@@ -596,7 +596,6 @@ impl SledMetadataDb {
 /// 2. atime -> filename
 /// The `filename` is the external cache key. Its `atime` is stored to remove old
 /// atime mapping.
-///
 impl LruMetadataStore for SledMetadataDb {
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss {
         let tx_result: TransactionResult<_, TransactionError> =
@@ -640,8 +639,10 @@ impl LruMetadataStore for SledMetadataDb {
                         value.len() as u64,
                         atime,
                     );
-                    let current_size =
-                        models::sled_lru_get_current_size(db, &self.cf) + value.len() as u64;
+                    let current_size = models::sled_lru_get_current_size(db, &self.cf)
+                        .unwrap()
+                        .unwrap()
+                        + value.len() as u64;
                     models::sled_lru_set_current_size(db, &self.cf, current_size);
                     histogram!(
                         metric::get_cache_size_metrics_key(&self.cf),
@@ -665,7 +666,12 @@ impl LruMetadataStore for SledMetadataDb {
         let default_tree: &sled::Tree = db;
         let atime_tree = &self.atime_tree;
         let metadata_tree = &self.metadata_tree;
-        while models::sled_lru_get_current_size_notx(db, prefix) + evict_size > size_limit {
+        while models::sled_lru_get_current_size_notx(db, prefix)
+            .unwrap()
+            .unwrap()
+            + evict_size
+            > size_limit
+        {
             // read a possible eviction candidate, multiple threads may read the same one
             if let Ok(Some(atime_tree_val)) = atime_tree.first() {
                 // An eviction is atomic
@@ -695,8 +701,10 @@ impl LruMetadataStore for SledMetadataDb {
                             let entry: SledMetadata =
                                 metadata_tree.get(filename).unwrap().unwrap().into();
                             let file_size = entry.size;
-                            let cache_size =
-                                models::sled_lru_get_current_size(db, prefix) - file_size;
+                            let cache_size = models::sled_lru_get_current_size(db, prefix)
+                                .unwrap()
+                                .unwrap()
+                                - file_size;
                             models::sled_lru_set_current_size(db, prefix, cache_size);
                             histogram!(
                                 metric::get_cache_size_metrics_key(&self.cf),
@@ -713,7 +721,11 @@ impl LruMetadataStore for SledMetadataDb {
 
     fn get_total_size(&self) -> u64 {
         self.db
-            .transaction::<_, _, ()>(|tx_db| Ok(models::sled_lru_get_current_size(tx_db, &self.cf)))
+            .transaction::<_, _, ()>(|tx_db| {
+                Ok(models::sled_lru_get_current_size(tx_db, &self.cf)
+                    .unwrap()
+                    .unwrap())
+            })
             .unwrap()
     }
 }

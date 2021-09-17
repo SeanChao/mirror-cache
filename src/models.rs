@@ -2,6 +2,7 @@ use crate::cache::CacheEntry;
 use crate::cache::LruCacheMetadata;
 use crate::error::Error::*;
 use crate::error::Result;
+use crate::util;
 use redis::{aio::Connection, Commands, Connection as SyncConnection};
 use sled::transaction::TransactionalTree;
 use std::collections::HashMap;
@@ -123,7 +124,7 @@ impl From<sled::IVec> for SledMetadata {
     fn from(vec: sled::IVec) -> Self {
         Self {
             atime: i64::from_be_bytes(vec.subslice(0, 8).as_ref().try_into().unwrap()),
-            size: u64::from_be_bytes(vec.subslice(8, 8).as_ref().try_into().unwrap()),
+            size: util::ivec_to_u64(&vec.subslice(8, 8)),
         }
     }
 }
@@ -172,7 +173,7 @@ pub fn sled_insert_cache_entry(
             sled_lru_set_current_size(
                 db,
                 prefix,
-                sled_lru_get_current_size(db, prefix) - old_entry.size,
+                sled_lru_get_current_size(db, prefix).unwrap().unwrap() - old_entry.size,
             );
             trace!(
                 "sled_insert_cache_entry updated entry {} -> ({} , {})",
@@ -196,26 +197,19 @@ pub fn sled_insert_cache_entry(
     atime_tree.insert(&atime.to_be_bytes(), key).unwrap();
 }
 
-pub fn sled_lru_get_current_size(db: &sled::transaction::TransactionalTree, prefix: &str) -> u64 {
-    let total_size_raw: [u8; 8] = db
-        .get(format!("{}_total_size", prefix))
-        .unwrap()
-        .unwrap()
-        .as_ref()
-        .try_into()
-        .unwrap();
-    u64::from_be_bytes(total_size_raw)
+pub fn sled_lru_get_current_size(
+    db: &sled::transaction::TransactionalTree,
+    prefix: &str,
+) -> Result<Option<u64>> {
+    Ok(db
+        .get(format!("{}_total_size", prefix))?
+        .map(|data| util::ivec_to_u64(&data)))
 }
 
-pub fn sled_lru_get_current_size_notx(db: &sled::Db, prefix: &str) -> u64 {
-    let total_size_raw: [u8; 8] = db
-        .get(format!("{}_total_size", prefix))
-        .unwrap()
-        .unwrap()
-        .as_ref()
-        .try_into()
-        .unwrap();
-    u64::from_be_bytes(total_size_raw)
+pub fn sled_lru_get_current_size_notx(db: &sled::Db, prefix: &str) -> Result<Option<u64>> {
+    db.get(format!("{}_total_size", prefix))
+        .map(|opt| opt.map(|data| util::ivec_to_u64(&data)))
+        .map_err(SledError)
 }
 
 pub fn sled_lru_set_current_size(
@@ -225,9 +219,23 @@ pub fn sled_lru_set_current_size(
 ) {
     db.insert(
         format!("{}_total_size", prefix).as_str(),
-        &size.to_be_bytes(),
+        &util::u64_to_array(size),
     )
     .unwrap();
+}
+
+pub fn sled_try_init_current_size(db: &TransactionalTree, prefix: &str) -> Result<()> {
+    let total_size_key = format!("{}_total_size", prefix);
+    match db.get(&total_size_key)? {
+        None => {
+            db.insert(total_size_key.as_str(), &util::u64_to_array(0))?;
+            Ok(())
+        }
+        Some(size_bytes) => {
+            debug!("sled:{} size={}", prefix, util::ivec_to_u64(&size_bytes));
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,8 @@ use crate::error::Result;
 use crate::metric;
 use metrics::increment_counter;
 use reqwest::ClientBuilder;
+use sled::IVec;
+use std::convert::TryInto;
 
 pub fn now() -> i64 {
     chrono::offset::Local::now().timestamp()
@@ -33,6 +35,14 @@ pub fn sleep_ms(ms: u64) {
     std::thread::sleep(std::time::Duration::from_millis(ms));
 }
 
+pub fn ivec_to_u64(ivec: &IVec) -> u64 {
+    u64::from_be_bytes(ivec.as_ref().try_into().unwrap())
+}
+
+pub fn u64_to_array(u: u64) -> [u8; 8] {
+    u.to_be_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,5 +54,11 @@ mod tests {
             set.insert(now_nanos());
         }
         assert_eq!(set.len(), 100);
+    }
+
+    #[test]
+    fn ivec_u64_conversion() {
+        let n: u64 = 233;
+        assert_eq!(ivec_to_u64(&(&u64_to_array(n)).into()), n);
     }
 }
