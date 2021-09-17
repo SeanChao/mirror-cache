@@ -64,7 +64,7 @@ Policies are an array of customized cache policies.
 
 Any changes on the configuration file will trigger a configuration reload after a delay of 2 secs.
 
-Note that some configurations like `port` and `log_level` cannot be updated.
+Note that some configurations like `port`, `log_level` and `hot_reload` cannot be updated.
 
 ## Cache Policies
 

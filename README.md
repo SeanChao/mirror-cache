@@ -19,13 +19,15 @@ A reverse proxy supporting multiple cache policies, customized rules, configurat
 
 ## Quick start
 
-Run the app:
+1. Download the [latest release](https://github.com/SeanChao/mirror-cache/releases/latest), or build from source:
 
 ```sh
 cargo run
 ```
 
-Try it out:
+2. Prepare a [configuration file](config.yml)
+
+3. Try it out:
 
 ```sh
 pip install -i http://localhost:9000 requests

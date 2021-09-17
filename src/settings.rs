@@ -9,6 +9,8 @@ pub struct Settings {
     redis: Redis,
     pub sled: Sled,
     pub log_level: String,
+    /// Whether to enable configuration file hot reloading
+    pub hot_reload: Option<bool>,
     pub rules: Vec<Rule>,
     pub policies: Vec<Policy>,
 }
@@ -87,6 +89,7 @@ impl Settings {
                 metadata_path: "sled/metadata".to_string(),
             },
             log_level: "info".to_string(),
+            hot_reload: Some(false),
             rules: vec![],
             policies: vec![],
         }

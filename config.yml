@@ -2,6 +2,7 @@ port: 9000
 metrics_port: 9001
 # log level: error / warn / info / debug / trace, default level is info
 log_level: info
+hot_reload: false
 
 redis:
   url: redis://localhost

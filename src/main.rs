@@ -65,6 +65,7 @@ async fn main() {
     let app_settings = settings::Settings::new(&config_filename).unwrap();
     let port = app_settings.port;
     let metrics_port = app_settings.metrics_port;
+    let hot_reload = app_settings.hot_reload.unwrap_or(false);
     let api = filters::root();
 
     // initialize the logger
@@ -100,21 +101,23 @@ async fn main() {
     metric::register_counters();
     register_rules_metrics(&app_settings.rules);
 
-    // Watcher::
-    // We listen to file changes by giving Notify
-    // a function that will get called when events happen.
-    // To make sure that the config lives as long as the function
-    // we need to move the ownership of the config inside the function
-    // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
-    let config_filename_clone = config_filename.clone();
-    let mut watcher =
-        RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
-            file_watch_handler(&config_filename_clone, result)
-        })
-        .unwrap();
-    watcher
-        .watch(Path::new(&config_filename), RecursiveMode::Recursive)
-        .unwrap();
+    if hot_reload {
+        // Watcher::
+        // We listen to file changes by giving Notify
+        // a function that will get called when events happen.
+        // To make sure that the config lives as long as the function
+        // we need to move the ownership of the config inside the function
+        // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
+        let config_filename_clone = config_filename.clone();
+        let mut watcher =
+            RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
+                file_watch_handler(&config_filename_clone, result)
+            })
+            .unwrap();
+        watcher
+            .watch(Path::new(&config_filename), RecursiveMode::Recursive)
+            .unwrap();
+    }
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
 }
