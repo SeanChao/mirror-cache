@@ -27,7 +27,7 @@ RUN apt-get install -y openssl ca-certificates
 RUN update-ca-certificates
 
 # Copy from the previous build
-COPY --from=build /mirror-cache/target/release/mirror-cache /app/mirror-cache
+COPY --from=build /mirror-cache/target/release/mirror-cache /bin/mirror-cache
 WORKDIR /app/
 # Run the binary
-CMD ["/app/mirror-cache"]
+CMD ["mirror-cache"]
