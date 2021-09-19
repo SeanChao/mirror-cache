@@ -32,6 +32,8 @@ The type of `size` in the config file is string. E.g: `1000` (B), `42 KB`, `2.33
 
 `log_level` specifies the log level. Allowed values are `trace`, `debug`, `info`, `warn`, `error`.
 
+`hot_reload` specifies whether to enable configuration hot reloading. Default `false`.
+
 #### Redis
 
 `url` is the Redis connection string.
@@ -55,7 +57,7 @@ Rules are an array of customized proxy rules.
 
 Policies are an array of customized cache policies.
 
-- `name`: the unique name of the policy
+- `name`: the **unique** name of the policy. Used in database key spaces and metrics to identify the policy in a user-friendly way.
 - `type`: the type of the policy, see [Cache Policies](#cache-policies) for details
 - `path`: the path of cached data
 - `metadata_db`: the metadata database to use: `redis` or `sled`. See [Cache Policies](#cache-policies) for details

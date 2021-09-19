@@ -6,7 +6,7 @@ build:
 run:
 	cargo run
 
-test:
+test: redis_conf
 	docker stop redis_test || return 0
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
 	rm -r cache || return 0
@@ -26,13 +26,17 @@ dev_deps:
 	cargo install cargo-watch
 	yarn global add zx
 
-redis:
+redis_conf:
+	rm -rf redis.conf || return 0
+	echo "notify-keyspace-events Kx" > redis.conf
+
+redis: redis_conf
 	docker run $(REDIS_OPTS) --name redis_dev -d --network host --rm redis /conf/redis.conf
 
 redis_stop:
 	docker stop redis_dev
 
-redis_test:
+redis_test: redis_conf
 	docker stop redis_test || return 0
 	docker run $(REDIS_OPTS) --name redis_test -d -p 3001:6379 --rm redis /conf/redis.conf
 
@@ -59,7 +63,6 @@ scenario_test:
 	zx ./scripts/pip_test.mjs
 	zx ./scripts/conda_test.mjs
 	zx ./scripts/conda_cloud_test.mjs
-	zx ./scripts/stress.mjs
 
 metrics:
 	docker run -d --rm --network host -v $$PWD/prom.yml:/srv/prom.yml:ro --name metrics prom/prometheus --config.file /srv/prom.yml

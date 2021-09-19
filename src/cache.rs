@@ -24,6 +24,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::vec::Vec;
 
+/// Datatype of cache size.
+/// Note: It is persistent in some database, so changes may not be backward compatible.
+type CacheSizeType = u64;
+
 pub enum CacheHitMiss {
     Hit,
     Miss,
@@ -110,8 +114,14 @@ pub trait LruMetadataStore: Sync + Send {
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss;
     fn set_lru_entry(&self, key: &str, value: &CacheData);
     /// Run eviction policy if needed, reserve at least `size` for new cache entry.
-    fn evict(&self, new_size: u64, new_key: &str, size_limit: u64, storage: &Storage);
-    fn get_total_size(&self) -> u64;
+    fn evict(
+        &self,
+        new_size: CacheSizeType,
+        new_key: &str,
+        size_limit: CacheSizeType,
+        storage: &Storage,
+    );
+    fn get_total_size(&self) -> CacheSizeType;
 }
 
 /// `TtlMetadataStore` defines required behavior for a TTL cache
@@ -127,20 +137,20 @@ pub trait TtlMetadataStore: Sync + Send {
 
 /// Wrapper of an LRU cache object
 pub struct LruCache {
-    pub size_limit: u64,
+    pub size_limit: CacheSizeType,
     metadata_db: Arc<dyn LruMetadataStore>,
     storage: Storage,
 }
 
 impl LruCache {
     pub fn new(
-        size_limit: u64,
+        size_limit: CacheSizeType,
         metadata_db: Arc<dyn LruMetadataStore>,
         storage: Storage,
-        metric_id: String,
+        metric_id: &str,
     ) -> Self {
         register_histogram!(
-            metric::get_cache_size_metrics_key(&metric_id),
+            metric::get_cache_size_metrics_key(metric_id),
             metrics::Unit::Bytes,
         );
         Self {
@@ -154,7 +164,7 @@ impl LruCache {
 #[async_trait]
 impl Cache for LruCache {
     async fn put(&self, key: &str, mut entry: CacheData) {
-        let file_size = entry.len() as u64;
+        let file_size = entry.len() as CacheSizeType;
 
         if file_size > self.size_limit {
             info!(
@@ -247,8 +257,11 @@ pub struct RedisMetadataDb {
 }
 
 impl RedisMetadataDb {
-    pub fn new(redis_client: redis::Client, id: String) -> Self {
-        Self { redis_client, id }
+    pub fn new(redis_client: redis::Client, id: &str) -> Self {
+        Self {
+            redis_client,
+            id: id.into(),
+        }
     }
 
     pub fn from_prefixed_key(&self, cache_key: &str) -> String {
@@ -312,7 +325,7 @@ impl LruMetadataStore for RedisMetadataDb {
     fn set_lru_entry(&self, key: &str, value: &CacheData) {
         let redis_key = &self.to_prefixed_key(key);
         let mut con = models::get_sync_con(&self.redis_client).unwrap();
-        let entry = &CacheEntry::new(redis_key, value.len() as u64);
+        let entry = &CacheEntry::new(redis_key, value.len() as CacheSizeType);
         let _redis_resp_str = models::set_lru_cache_entry(
             &mut con,
             redis_key,
@@ -323,7 +336,13 @@ impl LruMetadataStore for RedisMetadataDb {
         trace!("CACHE SET {} -> {:?}", &redis_key, value);
     }
 
-    fn evict(&self, new_size: u64, new_key: &str, size_limit: u64, storage: &Storage) {
+    fn evict(
+        &self,
+        new_size: CacheSizeType,
+        new_key: &str,
+        size_limit: CacheSizeType,
+        storage: &Storage,
+    ) {
         let redis_key = &self.to_prefixed_key(new_key);
         // eviction policy
         let file_size = new_size;
@@ -338,13 +357,13 @@ impl LruMetadataStore for RedisMetadataDb {
                     // LRU eviction
                     trace!(
                         "current {} + new {} > limit {}",
-                        con.get::<&str, Option<u64>>(&self.total_size_key())
+                        con.get::<&str, Option<CacheSizeType>>(&self.total_size_key())
                             .unwrap()
                             .unwrap_or(0),
                         file_size,
                         size_limit
                     );
-                    let pkg_to_remove: Vec<(String, u64)> =
+                    let pkg_to_remove: Vec<(String, CacheSizeType)> =
                         con.zpopmin(&self.entries_zlist_key(), 1).unwrap();
                     trace!("pkg_to_remove: {:?}", pkg_to_remove);
                     if pkg_to_remove.is_empty() {
@@ -366,10 +385,13 @@ impl LruMetadataStore for RedisMetadataDb {
                                 warn!("failed to remove file: {:?}", e);
                             }
                         };
-                        let pkg_size: Option<u64> = con.hget(&f, "size").unwrap();
+                        let pkg_size: Option<CacheSizeType> = con.hget(&f, "size").unwrap();
                         let _del_cnt = con.del::<&str, isize>(&f);
                         cur_cache_size = con
-                            .decr::<&str, u64, u64>(&self.total_size_key(), pkg_size.unwrap_or(0))
+                            .decr::<&str, CacheSizeType, CacheSizeType>(
+                                &self.total_size_key(),
+                                pkg_size.unwrap_or(0),
+                            )
                             .unwrap();
                         trace!("total_size -= {:?} -> {}", pkg_size, cur_cache_size);
                     }
@@ -379,10 +401,13 @@ impl LruMetadataStore for RedisMetadataDb {
         );
     }
 
-    fn get_total_size(&self) -> u64 {
+    fn get_total_size(&self) -> CacheSizeType {
         let key = self.total_size_key();
         let mut con = self.redis_client.get_connection().unwrap();
-        let size = con.get::<&str, Option<u64>>(&key).unwrap().unwrap_or(0);
+        let size = con
+            .get::<&str, Option<CacheSizeType>>(&key)
+            .unwrap()
+            .unwrap_or(0);
         histogram!(metric::get_cache_size_metrics_key(&self.id), size as f64);
         size
     }
@@ -636,13 +661,13 @@ impl LruMetadataStore for SledMetadataDb {
                         metadata_tree,
                         atime_tree,
                         key,
-                        value.len() as u64,
+                        value.len() as CacheSizeType,
                         atime,
                     );
                     let current_size = models::sled_lru_get_current_size(db, &self.cf)
                         .unwrap()
                         .unwrap()
-                        + value.len() as u64;
+                        + value.len() as CacheSizeType;
                     models::sled_lru_set_current_size(db, &self.cf, current_size);
                     histogram!(
                         metric::get_cache_size_metrics_key(&self.cf),
@@ -660,7 +685,13 @@ impl LruMetadataStore for SledMetadataDb {
     }
 
     /// Run eviction policy if needed, reserve at least `size` for new cache entry.
-    fn evict(&self, evict_size: u64, _new_key: &str, size_limit: u64, storage: &Storage) {
+    fn evict(
+        &self,
+        evict_size: CacheSizeType,
+        _new_key: &str,
+        size_limit: CacheSizeType,
+        storage: &Storage,
+    ) {
         let db = &self.db;
         let prefix = &self.cf;
         let default_tree: &sled::Tree = db;
@@ -719,7 +750,7 @@ impl LruMetadataStore for SledMetadataDb {
         }
     }
 
-    fn get_total_size(&self) -> u64 {
+    fn get_total_size(&self) -> CacheSizeType {
         self.db
             .transaction::<_, _, ()>(|tx_db| {
                 Ok(models::sled_lru_get_current_size(tx_db, &self.cf)
@@ -814,7 +845,7 @@ pub struct CacheEntry<Metadata, Key, Value> {
 
 #[derive(Debug)]
 pub struct LruCacheMetadata {
-    pub size: u64,
+    pub size: CacheSizeType,
     pub atime: i64, // last access timestamp
 }
 
@@ -884,7 +915,7 @@ mod tests {
     }
 
     impl LruCache {
-        fn get_total_size(&self) -> u64 {
+        fn get_total_size(&self) -> CacheSizeType {
             self.metadata_db.get_total_size()
         }
     }
@@ -933,11 +964,11 @@ mod tests {
         ($dir: expr, $size: expr, $redis_client: expr, $id: expr) => {
             LruCache::new(
                 $size,
-                Arc::new(RedisMetadataDb::new($redis_client, $id.to_string())),
+                Arc::new(RedisMetadataDb::new($redis_client, $id)),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
-                $id.to_string(),
+                $id,
             )
         };
     }
@@ -950,7 +981,7 @@ mod tests {
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
-                $id.to_string(),
+                $id,
             )
         };
     }
@@ -959,7 +990,7 @@ mod tests {
         ($dir: expr, $ttl: expr, $redis_client:expr, $id: expr) => {
             TtlCache::new(
                 $ttl,
-                Arc::new(RedisMetadataDb::new($redis_client, $id.to_string())),
+                Arc::new(RedisMetadataDb::new($redis_client, $id)),
                 Storage::FileSystem {
                     root_dir: $dir.to_string(),
                 },
@@ -1011,8 +1042,8 @@ mod tests {
         let cached_data = vec![42];
         let len = cached_data.len();
         cache_put!(lru_cache, "answer", cached_data.clone().into());
-        let total_size_expected = len as u64;
-        let total_size_actual: u64 = lru_cache.get_total_size();
+        let total_size_expected = len as CacheSizeType;
+        let total_size_actual: CacheSizeType = lru_cache.get_total_size();
         let cached_data_actual = get_file_all(&format!("{}/{}", TEST_CACHE_DIR, key));
         // metadata: size is 1, file content is the same
         assert_eq!(total_size_actual, total_size_expected);
@@ -1028,8 +1059,8 @@ mod tests {
         let cached_data = vec![42];
         let len = cached_data.len();
         cache_put!(lru_cache, "answer", cached_data.clone().into());
-        let total_size_expected = len as u64;
-        let total_size_actual: u64 = lru_cache.get_total_size();
+        let total_size_expected = len as CacheSizeType;
+        let total_size_actual: CacheSizeType = lru_cache.get_total_size();
         let cached_data_actual = get_file_all(&format!("{}/{}", TEST_CACHE_DIR, key));
         // metadata: size is 1, file content is the same
         assert_eq!(total_size_actual, total_size_expected);
@@ -1038,11 +1069,11 @@ mod tests {
 
     async fn lru_cache_size_constaint_tester(lru_cache: LruCache, cached_path: &str) {
         cache_put!(lru_cache, "tsu_ki", vec![0; 5].into());
-        let total_size_actual: u64 = lru_cache.get_total_size();
+        let total_size_actual: CacheSizeType = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 5);
         thread::sleep(time::Duration::from_secs(1));
         cache_put!(lru_cache, "kirei", vec![0; 11].into());
-        let total_size_actual: u64 = lru_cache.get_total_size();
+        let total_size_actual: CacheSizeType = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 16);
         assert_eq!(
             get_file_all(&format!("{}/{}", cached_path, "tsu_ki")),
