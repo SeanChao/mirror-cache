@@ -221,7 +221,7 @@ mod handlers {
         trace!("matched by rule #{}: {}", idx, &rule.path);
         increment_counter!(metric::COUNTER_REQ, "rule" => rule_label(rule));
         let replaced = re.replace_all(&path, &upstream);
-        let task = Task::Others {
+        let task = Task {
             rule_id: idx,
             url: String::from(replaced),
         };

@@ -21,8 +21,9 @@ use tokio::sync::RwLock;
 use warp::http::Response;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Task {
-    Others { rule_id: RuleId, url: String },
+pub struct Task {
+    pub rule_id: RuleId,
+    pub url: String,
 }
 
 pub enum TaskResponse {
@@ -67,13 +68,11 @@ impl warp::Reply for TaskResponse {
 impl Task {
     /// create a unique key for the current task
     pub fn to_key(&self) -> String {
-        match &self {
-            Task::Others { url, .. } => url
-                .replace("http://", "http/")
-                .replace("https://", "https/")
-                .trim_end_matches('/')
-                .to_string(),
-        }
+        self.url
+            .replace("http://", "http/")
+            .replace("https://", "https/")
+            .trim_end_matches('/')
+            .to_string()
     }
 }
 
@@ -113,13 +112,10 @@ impl TaskManager {
         // try get from cache
         let mut cache_result = None;
         let key = task.to_key();
-        match &task {
-            Task::Others { .. } => {
-                if let Some(bytes) = self.get(task, &key).await {
-                    cache_result = Some(bytes);
-                }
-            }
-        };
+
+        if let Some(bytes) = self.get(task, &key).await {
+            cache_result = Some(bytes);
+        }
         if let Some(data) = cache_result {
             info!("[Request] [HIT] {:?}", &task);
             return (Ok(data.into()), CacheHitMiss::Hit);
@@ -154,22 +150,19 @@ impl TaskManager {
                 }
                 // dispatch async cache task
                 let _ = self.spawn_task(task.clone()).await;
-                match &task {
-                    Task::Others { rule_id, .. } => {
-                        if let Some(rewrite_rules) = self.rewrite_map.get(rule_id) {
-                            let text = res.text().await.unwrap();
-                            let content = Self::rewrite_upstream(text, rewrite_rules);
-                            (Ok(content.into()), CacheHitMiss::Miss)
-                        } else {
-                            (
-                                Ok(TaskResponse::StreamResponse(Box::pin(
-                                    res.bytes_stream()
-                                        .map(move |x| x.map_err(Error::RequestError)),
-                                ))),
-                                CacheHitMiss::Miss,
-                            )
-                        }
-                    }
+                let rule_id = task.rule_id;
+                if let Some(rewrite_rules) = self.rewrite_map.get(&rule_id) {
+                    let text = res.text().await.unwrap();
+                    let content = Self::rewrite_upstream(text, rewrite_rules);
+                    (Ok(content.into()), CacheHitMiss::Miss)
+                } else {
+                    (
+                        Ok(TaskResponse::StreamResponse(Box::pin(
+                            res.bytes_stream()
+                                .map(move |x| x.map_err(Error::RequestError)),
+                        ))),
+                        CacheHitMiss::Miss,
+                    )
                 }
             }
             Err(e) => {
@@ -235,7 +228,7 @@ impl TaskManager {
         sled_metadata_path: &str,
     ) -> Result<Arc<dyn Cache>> {
         let policy_ident = policy_name;
-        for (idx, p) in policies.iter().enumerate() {
+        for p in policies {
             if p.name == policy_ident {
                 let policy_type = p.typ;
                 let metadata_db = p.metadata_db;
@@ -243,49 +236,41 @@ impl TaskManager {
                     (PolicyType::Lru, MetadataDb::Redis) => {
                         return Ok(Arc::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
-                            Arc::new(RedisMetadataDb::new(
-                                redis_client.unwrap(),
-                                format!("lru_rule_{}", idx),
-                            )),
+                            Arc::new(RedisMetadataDb::new(redis_client.unwrap(), policy_ident)),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
-                            format!("lru_rule_{}", idx),
+                            policy_ident,
                         )));
                     }
                     (PolicyType::Lru, MetadataDb::Sled) => {
-                        let id = format!("lru_rule_{}", idx);
                         return Ok(Arc::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
                             Arc::new(SledMetadataDb::new_lru(
-                                &format!("{}/{}", sled_metadata_path, &id),
-                                &id,
+                                &format!("{}/{}", sled_metadata_path, policy_ident),
+                                policy_ident,
                             )),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
-                            format!("lru_rule_{}", idx),
+                            policy_ident,
                         )));
                     }
                     (PolicyType::Ttl, MetadataDb::Redis) => {
                         return Ok(Arc::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
-                            Arc::new(RedisMetadataDb::new(
-                                redis_client.unwrap(),
-                                format!("ttl_rule_{}", idx),
-                            )),
+                            Arc::new(RedisMetadataDb::new(redis_client.unwrap(), policy_ident)),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),
                             },
                         )));
                     }
                     (PolicyType::Ttl, MetadataDb::Sled) => {
-                        let id = format!("ttl_rule_{}", policy_ident);
                         return Ok(Arc::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
                             Arc::new(SledMetadataDb::new_ttl(
-                                &format!("{}/{}", sled_metadata_path, &id),
-                                &id,
+                                &format!("{}/{}", sled_metadata_path, &policy_ident),
+                                policy_ident,
                                 p.clean_interval.unwrap(),
                             )),
                             Storage::FileSystem {
@@ -330,14 +315,8 @@ impl TaskManager {
         self.taskset_add(task.clone()).await;
         let task_set_len = Self::taskset_len(self.task_set.clone()).await;
         info!("[TASK] [len={}] + {:?}", task_set_len, task);
-        let c;
-        let rewrites;
-        match &task {
-            Task::Others { rule_id, .. } => {
-                c = self.get_cache_for_cache_rule(*rule_id).unwrap();
-                rewrites = self.rewrite_map.get(rule_id).cloned()
-            }
-        };
+        let c = self.get_cache_for_cache_rule(task.rule_id).unwrap();
+        let rewrites = self.rewrite_map.get(&task.rule_id).cloned();
         let task_clone = task.clone();
         let upstream_url = self.resolve_task_upstream(&task_clone);
         let task_list_ptr = self.task_set.clone();
@@ -394,15 +373,14 @@ impl TaskManager {
     }
 
     /// get task result from cache
-    pub async fn get(&self, task_type: &Task, key: &str) -> Option<CacheData> {
-        match &task_type {
-            Task::Others { rule_id, .. } => match self.get_cache_for_cache_rule(*rule_id) {
-                Some(cache) => cache.get(key).await,
-                None => {
-                    error!("Failed to get cache for rule #{} from cache map", rule_id);
-                    None
-                }
-            },
+    pub async fn get(&self, task: &Task, key: &str) -> Option<CacheData> {
+        let rule_id = task.rule_id;
+        match self.get_cache_for_cache_rule(rule_id) {
+            Some(cache) => cache.get(key).await,
+            None => {
+                error!("Failed to get cache for rule #{} from cache map", rule_id);
+                None
+            }
         }
     }
 
@@ -415,9 +393,7 @@ impl TaskManager {
     }
 
     pub fn resolve_task_upstream(&self, task_type: &Task) -> String {
-        match &task_type {
-            Task::Others { url, .. } => url.clone(),
-        }
+        task_type.url.clone()
     }
 
     pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn Cache>> {
@@ -425,9 +401,7 @@ impl TaskManager {
     }
 
     pub fn get_task_size_limit(&self, task: &Task) -> usize {
-        match task {
-            Task::Others { rule_id, .. } => self.rule_map.get(rule_id).unwrap().1,
-        }
+        self.rule_map.get(&task.rule_id).unwrap().1
     }
 }
 
