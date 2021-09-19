@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "mirror-cache"
-version = "0.0.1"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "bytefmt",

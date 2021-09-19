@@ -8,7 +8,7 @@ mod task;
 mod util;
 
 use cache::CacheHitMiss;
-use clap::{App, Arg};
+use clap::{crate_version, App, Arg};
 use metrics::{increment_counter, register_counter};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_util::MetricKindMask;
@@ -47,6 +47,7 @@ lazy_static::lazy_static! {
 #[tokio::main]
 async fn main() {
     let matches = App::new("mirror-cache")
+        .version(crate_version!())
         .arg(
             Arg::with_name("config")
                 .short("c")
