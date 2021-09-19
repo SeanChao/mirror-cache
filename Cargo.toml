@@ -1,8 +1,11 @@
 [package]
 name = "mirror-cache"
 version = "0.0.3"
-authors = ["SeanChao <seanchao0804@gmail.com>"]
 edition = "2018"
+authors = ["SeanChao <seanchao0804@gmail.com>"]
+repository = "https://github.com/SeanChao/mirror-cache"
+description = "A customizable reverse proxy with cache"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -31,6 +34,3 @@ serde_derive = "^1.0"
 serde = "^1.0"
 sled = "0.34"
 warp = "0.3"
-
-[dev-dependencies]
-serial_test = "*"
