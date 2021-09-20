@@ -271,7 +271,7 @@ impl TaskManager {
                             Arc::new(SledMetadataDb::new_ttl(
                                 &format!("{}/{}", sled_metadata_path, &policy_ident),
                                 policy_ident,
-                                p.clean_interval.unwrap(),
+                                p.clean_interval.unwrap_or(3),
                             )),
                             Storage::FileSystem {
                                 root_dir: p.path.clone().unwrap(),

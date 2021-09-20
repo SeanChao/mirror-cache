@@ -62,6 +62,8 @@ Policies are an array of customized cache policies.
 - `path`: the path of cached data
 - `metadata_db`: the metadata database to use: `redis` or `sled`. See [Cache Policies](#cache-policies) for details
 
+For other policy-specific options, see [Cache Policies](#cache-policies) for details.
+
 ### Hot reloading
 
 Any changes on the configuration file will trigger a configuration reload after a delay of 2 secs.
@@ -109,7 +111,7 @@ If a key expiration notification is published while the program is not running, 
 
 #### Sled Caveats
 
-In sled implementation of the cache, expired cache entries are cleaned periodically with specified interval (`clean_interval` in policy).
+In sled implementation of the cache, expired cache entries are cleaned periodically with specified interval (`clean_interval` in policy, default 3 secs).
 
 ## Metrics
 

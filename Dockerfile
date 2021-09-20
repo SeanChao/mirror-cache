@@ -1,5 +1,5 @@
 # Rust as the base image
-FROM rust:latest as build
+FROM rust:1 as build
 
 # Create a new empty shell project
 RUN USER=root cargo new --bin mirror-cache
@@ -20,8 +20,8 @@ COPY ./src ./src
 RUN rm ./target/release/deps/mirror_cache*
 RUN cargo build --release
 
-# The final base image
-FROM debian:buster-slim
+# The final base image, rust image is also base on debian:bullseye
+FROM debian:bullseye-slim
 RUN apt-get update
 RUN apt-get install -y openssl ca-certificates
 RUN update-ca-certificates
