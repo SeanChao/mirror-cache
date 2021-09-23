@@ -14,7 +14,7 @@ test: redis_conf
 	docker stop redis_test
 
 dev:
-	cargo watch -d 2 -w src -w Cargo.toml -x "run -- -c config.yml"
+	cargo watch -d 2 -w src -w Cargo.toml -x "run $(ARGS)"
 
 dev_clear:
 	rm -rf cache/* || return 0

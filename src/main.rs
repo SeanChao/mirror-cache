@@ -268,11 +268,25 @@ mod handlers {
 mod test {
     use super::*;
     use crate::settings::Settings;
+    use lazy_static::lazy_static;
     use warp::http::StatusCode;
     use warp::test::request;
     use warp::Filter;
 
     async fn setup() {
+        lazy_static! {
+            /// Initialize logger only once.
+            static ref LOGGER: () = {
+                let mut log_builder = pretty_env_logger::formatted_builder();
+                log_builder
+                    .filter_module("sled", log::LevelFilter::Info)
+                    .filter_level(log::LevelFilter::Trace)
+                    .target(pretty_env_logger::env_logger::Target::Stdout)
+                    .init();
+            };
+        };
+
+        let _ = &LOGGER;
         let settings = get_settings();
         TASK_MANAGER.write().await.refresh_config(&settings);
         let mut global_re_set_list = RE_SET_LIST.write().await;

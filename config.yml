@@ -29,47 +29,52 @@ rules:
     policy: "policy_lru"
 
   # Anaconda index [main]
-  - path: 'anaconda/pkgs/main/(.*repodata.json(.bz2)?)'
+  - path: "anaconda/pkgs/main/(.*repodata.json(.bz2)?)"
     upstream: "https://repo.anaconda.com/pkgs/main/$1"
     policy: "policy_ttl_60"
   # Anaconda packages [main]
   - path: "anaconda/pkgs/main"
     upstream: "https://repo.anaconda.com/pkgs/main"
-    policy: "policy_lru_anaconda"
+    policy: "policy_lru"
 
   # Anaconda cloud index
-  - path: 'anaconda/cloud/(.*repodata.json(.bz2)?)'
+  - path: "anaconda/cloud/(.*repodata.json(.bz2)?)"
     upstream: "https://conda.anaconda.org/$1"
     policy: "policy_ttl_60"
   # Anaconda cloud packages
   - path: "anaconda/cloud/"
     upstream: "https://conda.anaconda.org/"
-    policy: "policy_lru_anaconda"
+    policy: "policy_lru"
 
   # Ubuntu
-  - path: "ubuntu/dists/(.*)/(.*)"
+  - path: "ubuntu/dists/(.*)"
     policy: "policy_ubuntu"
-    upstream: "http://archive.ubuntu.com/ubuntu/dists/$1/$2"
+    upstream: "http://archive.ubuntu.com/ubuntu/dists/$1"
 
 policies:
   - name: policy_ttl_60
     type: TTL
     metadata_db: sled
-    path: "cache/ttl"
+    storage: in-mem
     timeout: 60
     clean_interval: 10 # TTL cache cleanup interval, for sled only
   - name: policy_lru
     type: LRU
     metadata_db: sled
+    storage: local-fs
     size: 1 GB
-    path: "cache/lru"
-  - name: policy_lru_anaconda
-    type: LRU
-    metadata_db: sled
-    size: 1073741824
-    path: "cache/lru"
   - name: policy_ubuntu
     type: LRU
     metadata_db: sled
+    storage: local-fs
     size: 128 MB
-    path: cache/ubuntu
+
+storages:
+  - name: local-fs
+    type: FS
+    config:
+      Fs:
+        path: "cache"
+  - name: in-mem
+    type: MEM
+    config: Mem

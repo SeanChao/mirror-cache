@@ -31,7 +31,7 @@ rules:
   # Anaconda packages [main]
   - path: "anaconda/pkgs/main"
     upstream: "https://repo.anaconda.com/pkgs/main"
-    policy: "policy_lru_anaconda"
+    policy: "policy_lru"
 
   # Anaconda cloud index
   - path: 'anaconda/cloud/(.*repodata.json(.bz2)?)'
@@ -46,20 +46,34 @@ policies:
   - name: policy_ttl
     type: TTL
     metadata_db: redis
+    storage: in-mem
     path: "cache/ttl"
     timeout: 3
   - name: policy_lru
     type: LRU
     metadata_db: sled
+    storage: local-fs
     size: 1073741824
     path: "cache/lru"
   - name: policy_lru_anaconda
     type: LRU
     metadata_db: redis
+    storage: local-fs
     size: 1073741824
     path: "cache/lru"
   - name: policy_ubuntu
     type: LRU
     metadata_db: sled
+    storage: local-fs
     size: 0x2000000 # 32M
     path: cache/ubuntu
+
+storages:
+  - name: local-fs
+    type: FS
+    config:
+      Fs:
+        path: "cache"
+  - name: in-mem
+    type: MEM
+    config: Mem
