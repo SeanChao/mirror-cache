@@ -102,6 +102,13 @@ async fn main() {
     metric::register_counters();
     register_rules_metrics(&app_settings.rules);
 
+    let config_filename_clone = config_filename.clone();
+    // make watcher live long enough
+    let mut watcher =
+        RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
+            file_watch_handler(&config_filename_clone, result)
+        })
+        .unwrap();
     if hot_reload {
         // Watcher::
         // We listen to file changes by giving Notify
@@ -109,12 +116,6 @@ async fn main() {
         // To make sure that the config lives as long as the function
         // we need to move the ownership of the config inside the function
         // To learn more about move please read [Using move Closures with Threads](https://doc.rust-lang.org/book/ch16-01-threads.html?highlight=move#using-move-closures-with-threads)
-        let config_filename_clone = config_filename.clone();
-        let mut watcher =
-            RecommendedWatcher::new(move |result: std::result::Result<Event, notify::Error>| {
-                file_watch_handler(&config_filename_clone, result)
-            })
-            .unwrap();
         watcher
             .watch(Path::new(&config_filename), RecursiveMode::Recursive)
             .unwrap();
