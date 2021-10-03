@@ -8,7 +8,7 @@ use crate::util;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{future, Stream, StreamExt};
+use futures::{future, stream, Stream, StreamExt};
 use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use sled::transaction::{TransactionError, TransactionResult};
@@ -26,7 +26,7 @@ use std::vec::Vec;
 
 /// Datatype of cache size.
 /// Note: It is persistent in some database, so changes may not be backward compatible.
-type CacheSizeType = u64;
+pub type CacheSizeType = u64;
 
 pub enum CacheHitMiss {
     Hit,
@@ -43,7 +43,7 @@ pub enum CacheData {
 }
 
 impl CacheData {
-    fn len(&self) -> CacheSizeType {
+    pub fn len(&self) -> CacheSizeType {
         match &self {
             CacheData::TextData(text) => text.len() as CacheSizeType,
             CacheData::BytesData(bytes) => bytes.len() as CacheSizeType,
@@ -65,6 +65,21 @@ impl CacheData {
                     .await;
                 vec
             }
+        }
+    }
+
+    pub fn into_byte_stream(self) -> Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> {
+        match self {
+            CacheData::TextData(data) => {
+                let stream = stream::iter(vec![Ok(Bytes::from(data))]);
+                let stream: Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> = Box::new(stream);
+                stream
+            }
+            CacheData::BytesData(data) => {
+                let stream = stream::iter(vec![Ok(data)]);
+                Box::new(stream)
+            }
+            CacheData::ByteStream(stream, _) => stream,
         }
     }
 }
@@ -197,11 +212,9 @@ impl Cache for LruCache {
                 Ok(_) => {
                     increment_counter!(metric::CNT_RM_FILES);
                     info!("LRU cache removed {}", &file);
-                    println!("LRU cache removed {}", &file);
                 }
                 Err(e) => {
                     warn!("failed to remove file: {:?}", e);
-                    println!("failed to remove file: {:?}", e);
                 }
             };
         }
@@ -394,7 +407,6 @@ impl LruMetadataStore for RedisMetadataDb {
                     let pkg_to_remove: Vec<(String, CacheSizeType)> =
                         con.zpopmin(&self.entries_zlist_key(), 1).unwrap();
                     trace!("pkg_to_remove: {:?}", pkg_to_remove);
-                    println!("pkg_to_remove: {:?}", pkg_to_remove);
                     if pkg_to_remove.is_empty() {
                         info!("some files need to be evicted but they are missing from redis filelist. The cache metadata is inconsistent.");
                         return Err(redis::RedisError::from(std::io::Error::new(

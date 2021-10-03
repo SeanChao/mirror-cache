@@ -78,3 +78,9 @@ storages:
   - name: in-mem
     type: MEM
     config: Mem
+  - name: S3
+    type: S3
+    config:
+      S3:
+        endpoint: "http://localhost:9123"
+        bucket: "cache"

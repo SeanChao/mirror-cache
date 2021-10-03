@@ -88,6 +88,7 @@ pub struct Storage {
 pub enum StorageConfig {
     Fs { path: String },
     Mem,
+    S3 { endpoint: String, bucket: String },
 }
 
 impl Settings {
@@ -126,7 +127,6 @@ impl Settings {
                         rule.name = Some(format!("rule_{}", idx));
                     }
                 }
-                println!("settings loaded: {:?}", settings);
                 Ok(settings)
             }
             Err(e) => Err(Error::ConfigDeserializeError(e)),

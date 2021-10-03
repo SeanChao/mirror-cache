@@ -235,6 +235,9 @@ impl TaskManager {
                 root_dir: path.clone(),
             },
             crate::settings::StorageConfig::Mem => Storage::new_mem(),
+            crate::settings::StorageConfig::S3 {
+                endpoint, bucket, ..
+            } => Storage::new_s3(endpoint, bucket),
         }
     }
 

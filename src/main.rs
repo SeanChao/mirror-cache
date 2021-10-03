@@ -118,6 +118,10 @@ async fn main() {
         watcher
             .watch(Path::new(&config_filename), RecursiveMode::Recursive)
             .unwrap();
+        info!(
+            "Configuration hot reloading is enabled! Watching: {}",
+            &config_filename
+        );
     }
 
     warp::serve(api).run(([127, 0, 0, 1], port)).await;
@@ -125,6 +129,7 @@ async fn main() {
 
 fn file_watch_handler(config_filename: &str, result: std::result::Result<Event, notify::Error>) {
     let event = result.unwrap();
+    println!(" -- {:?}", event);
     if event.kind.is_modify() {
         util::sleep_ms(2000);
         // update config:
