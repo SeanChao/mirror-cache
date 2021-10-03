@@ -13,6 +13,7 @@ pub struct Settings {
     pub hot_reload: Option<bool>,
     pub rules: Vec<Rule>,
     pub policies: Vec<Policy>,
+    pub storages: Vec<Storage>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -44,8 +45,8 @@ pub struct Policy {
     pub metadata_db: MetadataDb,
     pub timeout: Option<u64>,
     pub size: Option<String>,
-    pub path: Option<String>, // cache path
     pub clean_interval: Option<u64>,
+    pub storage: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -77,6 +78,19 @@ pub enum MetadataDb {
     Redis,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct Storage {
+    pub name: String,
+    pub config: StorageConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum StorageConfig {
+    Fs { path: String },
+    Mem,
+    S3 { endpoint: String, bucket: String },
+}
+
 impl Settings {
     pub fn default() -> Self {
         Settings {
@@ -92,6 +106,7 @@ impl Settings {
             hot_reload: Some(false),
             rules: vec![],
             policies: vec![],
+            storages: vec![],
         }
     }
 

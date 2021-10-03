@@ -82,7 +82,7 @@ pub type RuleId = usize;
 pub struct TaskManager {
     pub config: Settings,
     /// RuleId -> (cache, size_limit of payload)
-    pub rule_map: HashMap<RuleId, (Arc<dyn Cache>, usize)>,
+    pub rule_map: HashMap<RuleId, (Arc<RwLock<dyn Cache>>, usize)>,
     /// Specifies how to do the upstream rewrite for RuleId.
     /// RuleId -> Vec<Rewrite>
     pub rewrite_map: HashMap<RuleId, Vec<Rewrite>>,
@@ -187,10 +187,17 @@ impl TaskManager {
             policy_map.insert(rule.policy.clone());
         }
 
+        // Create storages
+        let mut storage_map = HashMap::new();
+        for storage_config in &app_settings.storages {
+            let storage = Self::create_storage(storage_config);
+            storage_map.insert(storage_config.name.clone(), Arc::new(storage));
+        }
+
         // Clear cache here, so that previous cache objects can be dropped
         tm.rule_map.clear();
         tm.rewrite_map.clear();
-        let mut cache_map: HashMap<String, Arc<dyn Cache>> = HashMap::new();
+        let mut cache_map: HashMap<String, _> = HashMap::new();
         let redis_client = redis::Client::open(redis_url).expect("failed to connect to redis");
         // create cache for each policy
         for policy in &policy_map {
@@ -199,6 +206,7 @@ impl TaskManager {
                 &policies,
                 Some(redis_client.clone()),
                 &app_settings.sled.metadata_path,
+                &storage_map,
             );
             cache_map.insert(policy.to_string(), cache.unwrap());
         }
@@ -221,12 +229,25 @@ impl TaskManager {
         }
     }
 
+    fn create_storage(storage: &crate::settings::Storage) -> crate::storage::Storage {
+        match &storage.config {
+            crate::settings::StorageConfig::Fs { path } => Storage::FileSystem {
+                root_dir: path.clone(),
+            },
+            crate::settings::StorageConfig::Mem => Storage::new_mem(),
+            crate::settings::StorageConfig::S3 {
+                endpoint, bucket, ..
+            } => Storage::new_s3(endpoint, bucket),
+        }
+    }
+
     fn create_cache_from_rule(
         policy_name: &str,
         policies: &[Policy],
         redis_client: Option<redis::Client>,
         sled_metadata_path: &str,
-    ) -> Result<Arc<dyn Cache>> {
+        storage_map: &HashMap<String, Arc<Storage>>,
+    ) -> Result<Arc<RwLock<dyn Cache>>> {
         let policy_ident = policy_name;
         for p in policies {
             if p.name == policy_ident {
@@ -234,49 +255,41 @@ impl TaskManager {
                 let metadata_db = p.metadata_db;
                 match (policy_type, metadata_db) {
                     (PolicyType::Lru, MetadataDb::Redis) => {
-                        return Ok(Arc::new(LruCache::new(
+                        return Ok(Arc::new(RwLock::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
                             Arc::new(RedisMetadataDb::new(redis_client.unwrap(), policy_ident)),
-                            Storage::FileSystem {
-                                root_dir: p.path.clone().unwrap(),
-                            },
+                            storage_map.get(&p.storage).unwrap().clone(),
                             policy_ident,
-                        )));
+                        ))));
                     }
                     (PolicyType::Lru, MetadataDb::Sled) => {
-                        return Ok(Arc::new(LruCache::new(
+                        return Ok(Arc::new(RwLock::new(LruCache::new(
                             p.size.as_ref().map_or(0, |x| bytefmt::parse(x).unwrap()),
                             Arc::new(SledMetadataDb::new_lru(
                                 &format!("{}/{}", sled_metadata_path, policy_ident),
                                 policy_ident,
                             )),
-                            Storage::FileSystem {
-                                root_dir: p.path.clone().unwrap(),
-                            },
+                            storage_map.get(&p.storage).unwrap().clone(),
                             policy_ident,
-                        )));
+                        ))));
                     }
                     (PolicyType::Ttl, MetadataDb::Redis) => {
-                        return Ok(Arc::new(TtlCache::new(
+                        return Ok(Arc::new(RwLock::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
                             Arc::new(RedisMetadataDb::new(redis_client.unwrap(), policy_ident)),
-                            Storage::FileSystem {
-                                root_dir: p.path.clone().unwrap(),
-                            },
-                        )));
+                            storage_map.get(&p.storage).unwrap().clone(),
+                        ))));
                     }
                     (PolicyType::Ttl, MetadataDb::Sled) => {
-                        return Ok(Arc::new(TtlCache::new(
+                        return Ok(Arc::new(RwLock::new(TtlCache::new(
                             p.timeout.unwrap_or(0),
                             Arc::new(SledMetadataDb::new_ttl(
                                 &format!("{}/{}", sled_metadata_path, &policy_ident),
                                 policy_ident,
-                                p.clean_interval.unwrap(),
+                                p.clean_interval.unwrap_or(3),
                             )),
-                            Storage::FileSystem {
-                                root_dir: p.path.clone().unwrap(),
-                            },
-                        )));
+                            storage_map.get(&p.storage).unwrap().clone(),
+                        ))));
                     }
                 };
             }
@@ -334,20 +347,25 @@ impl TaskManager {
                             }
                             let mut content = content.unwrap();
                             content = Self::rewrite_upstream(content, &rewrites);
-                            c.put(&task_clone.to_key(), content.into()).await;
+                            c.write()
+                                .await
+                                .put(&task_clone.to_key(), content.into())
+                                .await;
                         } else {
                             let len = res.content_length();
                             let bytestream = res.bytes_stream();
-                            c.put(
-                                &task_clone.to_key(),
-                                CacheData::ByteStream(
-                                    Box::new(
-                                        bytestream.map(move |x| x.map_err(Error::RequestError)),
+                            c.write()
+                                .await
+                                .put(
+                                    &task_clone.to_key(),
+                                    CacheData::ByteStream(
+                                        Box::new(
+                                            bytestream.map(move |x| x.map_err(Error::RequestError)),
+                                        ),
+                                        len,
                                     ),
-                                    len.map(|x| x as usize),
-                                ),
-                            )
-                            .await;
+                                )
+                                .await;
                         }
                         increment_counter!(metric::CNT_TASKS_BG_SUCCESS);
                     } else {
@@ -376,7 +394,7 @@ impl TaskManager {
     pub async fn get(&self, task: &Task, key: &str) -> Option<CacheData> {
         let rule_id = task.rule_id;
         match self.get_cache_for_cache_rule(rule_id) {
-            Some(cache) => cache.get(key).await,
+            Some(cache) => cache.read().await.get(key).await,
             None => {
                 error!("Failed to get cache for rule #{} from cache map", rule_id);
                 None
@@ -396,7 +414,7 @@ impl TaskManager {
         task_type.url.clone()
     }
 
-    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<dyn Cache>> {
+    pub fn get_cache_for_cache_rule(&self, rule_id: RuleId) -> Option<Arc<RwLock<dyn Cache>>> {
         self.rule_map.get(&rule_id).map(|tuple| tuple.0.clone())
     }
 

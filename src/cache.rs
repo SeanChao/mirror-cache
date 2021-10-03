@@ -8,7 +8,7 @@ use crate::util;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{future, stream, Stream, StreamExt};
 use metrics::{histogram, increment_counter, register_histogram};
 use redis::Commands;
 use sled::transaction::{TransactionError, TransactionResult};
@@ -26,7 +26,7 @@ use std::vec::Vec;
 
 /// Datatype of cache size.
 /// Note: It is persistent in some database, so changes may not be backward compatible.
-type CacheSizeType = u64;
+pub type CacheSizeType = u64;
 
 pub enum CacheHitMiss {
     Hit,
@@ -38,16 +38,48 @@ pub enum CacheData {
     BytesData(Bytes),
     ByteStream(
         Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin>,
-        Option<usize>,
+        Option<CacheSizeType>,
     ), // stream and size
 }
 
 impl CacheData {
-    fn len(&self) -> usize {
+    pub fn len(&self) -> CacheSizeType {
         match &self {
-            CacheData::TextData(text) => text.len(),
-            CacheData::BytesData(bytes) => bytes.len(),
+            CacheData::TextData(text) => text.len() as CacheSizeType,
+            CacheData::BytesData(bytes) => bytes.len() as CacheSizeType,
             CacheData::ByteStream(_, size) => size.unwrap(),
+        }
+    }
+
+    pub async fn into_vec_u8(self) -> Vec<u8> {
+        match self {
+            CacheData::TextData(text) => text.into_bytes(),
+            CacheData::BytesData(bytes) => bytes.to_vec(),
+            CacheData::ByteStream(stream, _) => {
+                let mut vec: Vec<u8> = Vec::new();
+                stream
+                    .for_each(|item| {
+                        vec.append(&mut item.unwrap().to_vec());
+                        future::ready(())
+                    })
+                    .await;
+                vec
+            }
+        }
+    }
+
+    pub fn into_byte_stream(self) -> Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> {
+        match self {
+            CacheData::TextData(data) => {
+                let stream = stream::iter(vec![Ok(Bytes::from(data))]);
+                let stream: Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> = Box::new(stream);
+                stream
+            }
+            CacheData::BytesData(data) => {
+                let stream = stream::iter(vec![Ok(data)]);
+                Box::new(stream)
+            }
+            CacheData::ByteStream(stream, _) => stream,
         }
     }
 }
@@ -105,7 +137,7 @@ impl fmt::Debug for CacheData {
 /// - `get`: get a value from the cache
 #[async_trait]
 pub trait Cache: Sync + Send {
-    async fn put(&self, key: &str, entry: CacheData);
+    async fn put(&mut self, key: &str, entry: CacheData);
     async fn get(&self, key: &str) -> Option<CacheData>;
 }
 
@@ -114,13 +146,13 @@ pub trait LruMetadataStore: Sync + Send {
     fn get_lru_entry(&self, key: &str) -> CacheHitMiss;
     fn set_lru_entry(&self, key: &str, value: &CacheData);
     /// Run eviction policy if needed, reserve at least `size` for new cache entry.
+    /// Return a list of evicted keys.
     fn evict(
         &self,
         new_size: CacheSizeType,
         new_key: &str,
         size_limit: CacheSizeType,
-        storage: &Storage,
-    );
+    ) -> Vec<String>;
     fn get_total_size(&self) -> CacheSizeType;
 }
 
@@ -139,14 +171,14 @@ pub trait TtlMetadataStore: Sync + Send {
 pub struct LruCache {
     pub size_limit: CacheSizeType,
     metadata_db: Arc<dyn LruMetadataStore>,
-    storage: Storage,
+    storage: Arc<Storage>,
 }
 
 impl LruCache {
     pub fn new(
         size_limit: CacheSizeType,
         metadata_db: Arc<dyn LruMetadataStore>,
-        storage: Storage,
+        storage: Arc<Storage>,
         metric_id: &str,
     ) -> Self {
         register_histogram!(
@@ -163,7 +195,7 @@ impl LruCache {
 
 #[async_trait]
 impl Cache for LruCache {
-    async fn put(&self, key: &str, mut entry: CacheData) {
+    async fn put(&mut self, key: &str, entry: CacheData) {
         let file_size = entry.len() as CacheSizeType;
 
         if file_size > self.size_limit {
@@ -174,11 +206,21 @@ impl Cache for LruCache {
             return;
         }
         // Run eviction, set new entry
-        self.metadata_db
-            .evict(file_size, key, self.size_limit, &self.storage);
+        let evicted_keys = self.metadata_db.evict(file_size, key, self.size_limit);
+        for file in evicted_keys {
+            match self.storage.remove(&file).await {
+                Ok(_) => {
+                    increment_counter!(metric::CNT_RM_FILES);
+                    info!("LRU cache removed {}", &file);
+                }
+                Err(e) => {
+                    warn!("failed to remove file: {:?}", e);
+                }
+            };
+        }
         self.metadata_db.set_lru_entry(key, &entry);
         // self.metadata_db.set(key, &mut entry);
-        self.storage.persist(key, &mut entry).await;
+        self.storage.persist(key, entry).await;
     }
 
     async fn get(&self, key: &str) -> Option<CacheData> {
@@ -203,13 +245,13 @@ impl Cache for LruCache {
 pub struct TtlCache {
     pub ttl: u64,
     metadata_db: Arc<dyn TtlMetadataStore>,
-    storage: Storage,
+    storage: Arc<Storage>,
     pub pending_close: Arc<AtomicBool>,
     pub expiration_thread_handler: Option<JoinHandle<()>>,
 }
 
 impl TtlCache {
-    pub fn new(ttl: u64, metadata_db: Arc<dyn TtlMetadataStore>, storage: Storage) -> Self {
+    pub fn new(ttl: u64, metadata_db: Arc<dyn TtlMetadataStore>, storage: Arc<Storage>) -> Self {
         let mut cache = Self {
             ttl,
             metadata_db,
@@ -245,9 +287,9 @@ impl Cache for TtlCache {
             }
         }
     }
-    async fn put(&self, key: &str, mut entry: CacheData) {
+    async fn put(&mut self, key: &str, entry: CacheData) {
         self.metadata_db.set_ttl_entry(key, &entry, self.ttl);
-        self.storage.persist(key, &mut entry).await;
+        self.storage.persist(key, entry).await;
     }
 }
 
@@ -341,10 +383,9 @@ impl LruMetadataStore for RedisMetadataDb {
         new_size: CacheSizeType,
         new_key: &str,
         size_limit: CacheSizeType,
-        storage: &Storage,
-    ) {
+    ) -> Vec<String> {
+        let mut files_to_remove = Vec::new();
         let redis_key = &self.to_prefixed_key(new_key);
-        // eviction policy
         let file_size = new_size;
         let mut sync_con = models::get_sync_con(&self.redis_client).unwrap();
         // evict cache entry if necessary
@@ -373,18 +414,14 @@ impl LruMetadataStore for RedisMetadataDb {
                             "cache metadata inconsistent",
                         )));
                     }
-                    // remove from local fs and metadata in redis
+                    files_to_remove.append(
+                        &mut pkg_to_remove
+                            .iter()
+                            .map(|(k, _)| self.from_prefixed_key(k))
+                            .collect(),
+                    );
+                    // remove metadata in redis
                     for (f, _) in pkg_to_remove {
-                        let file = self.from_prefixed_key(&f);
-                        match storage.remove(&file) {
-                            Ok(_) => {
-                                increment_counter!(metric::CNT_RM_FILES);
-                                info!("LRU cache removed {}", &file);
-                            }
-                            Err(e) => {
-                                warn!("failed to remove file: {:?}", e);
-                            }
-                        };
                         let pkg_size: Option<CacheSizeType> = con.hget(&f, "size").unwrap();
                         let _del_cnt = con.del::<&str, isize>(&f);
                         cur_cache_size = con
@@ -399,6 +436,7 @@ impl LruMetadataStore for RedisMetadataDb {
                 Ok(Some(()))
             },
         );
+        files_to_remove
     }
 
     fn get_total_size(&self) -> CacheSizeType {
@@ -455,78 +493,81 @@ impl TtlMetadataStore for RedisMetadataDb {
         let id_clone = self.id.to_string();
         let storage_clone = storage.clone();
         let pending_close_clone = pending_close;
+
         let expiration_thread_handler = std::thread::spawn(move || {
             debug!("TTL expiration listener is created!");
-            loop {
-                if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                    return;
-                }
-                match cloned_client.get_connection() {
-                    Ok(mut con) => {
-                        let mut pubsub = con.as_pubsub();
-                        trace!("subscribe to cache key pattern: {}", &id_clone);
-                        match pubsub.psubscribe(format!("__keyspace*__:{}*", &id_clone)) {
-                            Ok(_) => {}
-                            Err(e) => {
-                                error!("Failed to psubscribe: {}", e);
-                                continue;
-                            }
-                        }
-                        pubsub
-                            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                            .unwrap();
-                        loop {
-                            // break if the associated cache object is about to be closed
-                            if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                                return;
-                            }
-                            match pubsub.get_message() {
-                                Ok(msg) => {
-                                    let channel: String = msg.get_channel().unwrap();
-                                    let payload: String = msg.get_payload().unwrap();
-                                    let redis_key = &channel[channel.find(':').unwrap() + 1..];
-                                    let file = Self::from_redis_key(&id_clone, redis_key);
-                                    trace!(
-                                        "channel '{}': payload {}, file: {}",
-                                        msg.get_channel_name(),
-                                        payload,
-                                        file,
-                                    );
-                                    if payload != "expired" {
-                                        continue;
-                                    }
-                                    match storage_clone.remove(&file) {
-                                        Ok(_) => {
-                                            increment_counter!(metric::CNT_RM_FILES);
-                                            info!("TTL cache removed {}", &file);
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to remove {}: {}", &file, e);
-                                        }
-                                    }
-                                }
+            futures::executor::block_on(async move {
+                loop {
+                    if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    match cloned_client.get_connection() {
+                        Ok(mut con) => {
+                            let mut pubsub = con.as_pubsub();
+                            trace!("subscribe to cache key pattern: {}", &id_clone);
+                            match pubsub.psubscribe(format!("__keyspace*__:{}*", &id_clone)) {
+                                Ok(_) => {}
                                 Err(e) => {
-                                    if e.kind() == redis::ErrorKind::IoError && e.is_timeout() {
-                                        // ignore timeout error, as expected
-                                    } else {
-                                        error!(
-                                            "Failed to get_message, retrying every 3s: {} {:?}",
-                                            e,
-                                            e.kind()
+                                    error!("Failed to psubscribe: {}", e);
+                                    continue;
+                                }
+                            }
+                            pubsub
+                                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                                .unwrap();
+                            loop {
+                                // break if the associated cache object is about to be closed
+                                if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                                    return;
+                                }
+                                match pubsub.get_message() {
+                                    Ok(msg) => {
+                                        let channel: String = msg.get_channel().unwrap();
+                                        let payload: String = msg.get_payload().unwrap();
+                                        let redis_key = &channel[channel.find(':').unwrap() + 1..];
+                                        let file = Self::from_redis_key(&id_clone, redis_key);
+                                        trace!(
+                                            "channel '{}': payload {}, file: {}",
+                                            msg.get_channel_name(),
+                                            payload,
+                                            file,
                                         );
-                                        util::sleep_ms(3000);
-                                        break;
+                                        if payload != "expired" {
+                                            continue;
+                                        }
+                                        match storage_clone.remove(&file).await {
+                                            Ok(_) => {
+                                                increment_counter!(metric::CNT_RM_FILES);
+                                                info!("TTL cache removed {}", &file);
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to remove {}: {}", &file, e);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if e.kind() == redis::ErrorKind::IoError && e.is_timeout() {
+                                            // ignore timeout error, as expected
+                                        } else {
+                                            error!(
+                                                "Failed to get_message, retrying every 3s: {} {:?}",
+                                                e,
+                                                e.kind()
+                                            );
+                                            util::sleep_ms(3000);
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!("Failed to get redis connection: {}", e);
-                        util::sleep_ms(3000);
+                        Err(e) => {
+                            error!("Failed to get redis connection: {}", e);
+                            util::sleep_ms(3000);
+                        }
                     }
                 }
-            }
+            });
         });
         Ok(expiration_thread_handler)
     }
@@ -690,8 +731,8 @@ impl LruMetadataStore for SledMetadataDb {
         evict_size: CacheSizeType,
         _new_key: &str,
         size_limit: CacheSizeType,
-        storage: &Storage,
-    ) {
+    ) -> Vec<String> {
+        let mut files_to_remove = Vec::new();
         let db = &self.db;
         let prefix = &self.cf;
         let default_tree: &sled::Tree = db;
@@ -706,48 +747,43 @@ impl LruMetadataStore for SledMetadataDb {
             // read a possible eviction candidate, multiple threads may read the same one
             if let Ok(Some(atime_tree_val)) = atime_tree.first() {
                 // An eviction is atomic
-                let _tx_result: sled::transaction::TransactionResult<_, ()> =
+                let tx_result: sled::transaction::TransactionResult<_, ()> =
                     (default_tree, atime_tree, metadata_tree).transaction::<_, _>(
                         |(db, atime_tree, metadata_tree)| {
                             match atime_tree.get(&atime_tree_val.0) {
                                 Ok(Some(_)) => {
                                     // transactions in sled are serializable, continue
+                                    let filename: &str =
+                                        std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
+                                    let entry: SledMetadata =
+                                        metadata_tree.get(filename).unwrap().unwrap().into();
+                                    let file_size = entry.size;
+                                    let cache_size = models::sled_lru_get_current_size(db, prefix)
+                                        .unwrap()
+                                        .unwrap()
+                                        - file_size;
+                                    models::sled_lru_set_current_size(db, prefix, cache_size);
+                                    histogram!(
+                                        metric::get_cache_size_metrics_key(&self.cf),
+                                        cache_size as f64
+                                    );
+                                    metadata_tree.remove(filename).unwrap();
+                                    atime_tree.remove(&atime_tree_val.0).unwrap();
+                                    Ok(Some(filename.to_string()))
                                 }
                                 _ => {
                                     // some other thread would remove the entry
-                                    return Ok(());
+                                    Ok(None)
                                 }
                             }
-                            let filename: &str =
-                                std::str::from_utf8(atime_tree_val.1.as_ref()).unwrap();
-                            match storage.remove(filename) {
-                                Ok(_) => {
-                                    increment_counter!(metric::CNT_RM_FILES);
-                                    info!("LRU sled cache removed {}", &filename);
-                                }
-                                Err(e) => {
-                                    warn!("failed to remove file {}: {:?}", filename, e);
-                                }
-                            }
-                            let entry: SledMetadata =
-                                metadata_tree.get(filename).unwrap().unwrap().into();
-                            let file_size = entry.size;
-                            let cache_size = models::sled_lru_get_current_size(db, prefix)
-                                .unwrap()
-                                .unwrap()
-                                - file_size;
-                            models::sled_lru_set_current_size(db, prefix, cache_size);
-                            histogram!(
-                                metric::get_cache_size_metrics_key(&self.cf),
-                                cache_size as f64
-                            );
-                            metadata_tree.remove(filename).unwrap();
-                            atime_tree.remove(&atime_tree_val.0).unwrap();
-                            Ok(())
                         },
                     );
+                if let Some(filename) = tx_result.unwrap() {
+                    files_to_remove.push(filename);
+                }
             }
         }
+        files_to_remove
     }
 
     fn get_total_size(&self) -> CacheSizeType {
@@ -802,35 +838,45 @@ impl TtlMetadataStore for SledMetadataDb {
         let metadata_tree = self.metadata_tree.clone();
         let clean_interval = self.clean_interval;
         let expiration_thread_handler = std::thread::spawn(move || {
-            debug!("TTL expiration listener is created! (sled)");
-            loop {
-                if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                    return;
-                }
-                let time = util::now_nanos();
-                atime_tree.range(..time.to_be_bytes()).for_each(|e| {
-                    let e = e.unwrap();
-                    let key = std::str::from_utf8(e.1.as_ref()).unwrap();
-                    let _tx_result: TransactionResult<_, ()> = (&atime_tree, &metadata_tree)
-                        .transaction(|(atime_tree, metadata_tree)| {
-                            atime_tree.remove(&e.0).unwrap();
-                            metadata_tree.remove(&e.1).unwrap();
-                            Ok(())
-                        });
-                    match storage_clone.remove(key) {
-                        Ok(_) => {
-                            increment_counter!(metric::CNT_RM_FILES);
-                            info!("TTL cache removed {}", &key);
-                        }
-                        Err(e) => {
-                            warn!("Failed to remove {}: {}.", &key, e);
+            futures::executor::block_on(async move {
+                debug!("TTL expiration listener is created! (sled)");
+                loop {
+                    if pending_close_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    let time = util::now_nanos();
+                    let files_to_remove: Vec<String> = atime_tree
+                        .range(..time.to_be_bytes())
+                        .map(|e| {
+                            let e = e.unwrap();
+                            let key = std::str::from_utf8(e.1.as_ref()).unwrap();
+                            let _tx_result: TransactionResult<_, ()> =
+                                (&atime_tree, &metadata_tree).transaction(
+                                    |(atime_tree, metadata_tree)| {
+                                        atime_tree.remove(&e.0).unwrap();
+                                        metadata_tree.remove(&e.1).unwrap();
+                                        Ok(())
+                                    },
+                                );
+                            key.to_string()
+                        })
+                        .collect();
+                    for key in files_to_remove {
+                        match storage_clone.remove(&key).await {
+                            Ok(_) => {
+                                increment_counter!(metric::CNT_RM_FILES);
+                                info!("TTL cache removed {}", &key);
+                            }
+                            Err(e) => {
+                                warn!("Failed to remove {}: {}.", &key, e);
+                            }
                         }
                     }
-                });
-                // park the thread, and unpark it when `drop` is called so that
-                // configuration update will no be blocked.
-                std::thread::park_timeout(std::time::Duration::from_secs(clean_interval));
-            }
+                    // park the thread, and unpark it when `drop` is called so that
+                    // configuration update will not be blocked.
+                    std::thread::park_timeout(std::time::Duration::from_secs(clean_interval));
+                }
+            });
         });
         Ok(expiration_thread_handler)
     }
@@ -877,7 +923,7 @@ pub struct NoCache {}
 
 #[async_trait]
 impl Cache for NoCache {
-    async fn put(&self, _key: &str, _entry: CacheData) {}
+    async fn put(&mut self, _key: &str, _entry: CacheData) {}
     async fn get(&self, _key: &str) -> Option<CacheData> {
         None
     }
@@ -894,6 +940,7 @@ mod tests {
     use std::io::prelude::*;
     use std::thread;
     use std::time;
+    use tokio::sync::RwLock;
 
     impl CacheData {
         pub async fn to_vec(self) -> Vec<u8> {
@@ -965,9 +1012,9 @@ mod tests {
             LruCache::new(
                 $size,
                 Arc::new(RedisMetadataDb::new($redis_client, $id)),
-                Storage::FileSystem {
+                Arc::new(Storage::FileSystem {
                     root_dir: $dir.to_string(),
-                },
+                }),
                 $id,
             )
         };
@@ -978,9 +1025,9 @@ mod tests {
             LruCache::new(
                 $size,
                 Arc::new(SledMetadataDb::new_lru(&format!("{}/sled", $dir), $id)),
-                Storage::FileSystem {
+                Arc::new(Storage::FileSystem {
                     root_dir: $dir.to_string(),
-                },
+                }),
                 $id,
             )
         };
@@ -991,9 +1038,9 @@ mod tests {
             TtlCache::new(
                 $ttl,
                 Arc::new(RedisMetadataDb::new($redis_client, $id)),
-                Storage::FileSystem {
+                Arc::new(Storage::FileSystem {
                     root_dir: $dir.to_string(),
-                },
+                }),
             )
         };
     }
@@ -1003,9 +1050,9 @@ mod tests {
             TtlCache::new(
                 $ttl,
                 Arc::new(SledMetadataDb::new_ttl($dir, $id, $interval)),
-                Storage::FileSystem {
+                Arc::new(Storage::FileSystem {
                     root_dir: $dir.to_string(),
-                },
+                }),
             )
         };
     }
@@ -1022,17 +1069,10 @@ mod tests {
         };
     }
 
-    // #[test]
-    // fn lru_prefix_key() {
-    //     let lru_cache =
-    //         new_lru_redis_cache!(TEST_CACHE_DIR, 1024, new_redis_client(), "prefix_key_test");
-    //     assert_eq!(lru_cache.to_prefixed_key("April"), "prefix_key_test_April")
-    // }
-
     #[tokio::test]
     async fn lru_redis_cache_entry_set_success() {
         let redis_client = new_redis_client();
-        let lru_cache = new_lru_redis_cache!(
+        let mut lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
             16 * 1024 * 1024,
             redis_client,
@@ -1053,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn lru_sled_cache_entry_set_success() {
         setup();
-        let lru_cache =
+        let mut lru_cache =
             new_lru_sled_cache!(TEST_CACHE_DIR, 16 * 1024 * 1024, "test_cache_entry_success");
         let key = "answer";
         let cached_data = vec![42];
@@ -1067,7 +1107,7 @@ mod tests {
         assert_eq!(&cached_data_actual, &cached_data);
     }
 
-    async fn lru_cache_size_constaint_tester(lru_cache: LruCache, cached_path: &str) {
+    async fn lru_cache_size_constaint_tester(mut lru_cache: LruCache, cached_path: &str) {
         cache_put!(lru_cache, "tsu_ki", vec![0; 5].into());
         let total_size_actual: CacheSizeType = lru_cache.get_total_size();
         assert_eq!(total_size_actual, 5);
@@ -1099,7 +1139,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lru_cache_size_constraint() {
+    async fn lru_redis_cache_size_constraint() {
+        setup();
         let redis_client = new_redis_client();
         let lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
@@ -1118,7 +1159,7 @@ mod tests {
         lru_cache_size_constaint_tester(sled_lru_cache, cached_dir).await;
     }
 
-    async fn test_lru_cache_no_evict_recent_tester(lru_cache: LruCache) {
+    async fn test_lru_cache_no_evict_recent_tester(mut lru_cache: LruCache) {
         let key1 = "1二号去听经";
         let key2 = "2晚上住旅店";
         let key3 = "3三号去餐厅";
@@ -1164,7 +1205,7 @@ mod tests {
     #[tokio::test]
     async fn key_update_total_size() {
         let redis_client = new_redis_client();
-        let lru_cache = new_lru_redis_cache!(
+        let mut lru_cache = new_lru_redis_cache!(
             TEST_CACHE_DIR,
             3,
             redis_client,
@@ -1175,7 +1216,7 @@ mod tests {
         assert_eq!(lru_cache.get_total_size(), 1);
         cache_put!(lru_cache, key, vec![0, 1].into());
         assert_eq!(lru_cache.get_total_size(), 2);
-        let lru_cache = new_lru_sled_cache!(
+        let mut lru_cache = new_lru_sled_cache!(
             &format!("{}/key_update_no_change_total_size", TEST_CACHE_DIR),
             3,
             "key_update_no_change_total_size"
@@ -1187,7 +1228,7 @@ mod tests {
         assert_eq!(lru_cache.get_total_size(), 2);
     }
 
-    async fn lru_cache_isolation_tester(lru_cache_1: LruCache, lru_cache_2: LruCache) {
+    async fn lru_cache_isolation_tester(mut lru_cache_1: LruCache, mut lru_cache_2: LruCache) {
         cache_put!(lru_cache_1, "1", vec![1].into());
         cache_put!(lru_cache_2, "2", vec![2].into());
         assert_eq!(lru_cache_1.get_total_size(), 1);
@@ -1243,26 +1284,27 @@ mod tests {
             2,
             "cache_concurrency"
         );
-        let arc_cache = Arc::new(cache);
+        let arc_cache = Arc::new(RwLock::new(cache));
         let mut threads = Vec::new();
         for _ in 0..256 {
             let cache = arc_cache.clone();
             threads.push(tokio::spawn(async move {
-                cache.put("k1", vec![1].into()).await;
-                cache.put("k2", vec![2].into()).await;
-                cache.put("k3", vec![3].into()).await;
-                cache.put("k4", vec![4].into()).await;
+                cache.write().await.put("k1", vec![1].into()).await;
+                cache.write().await.put("k2", vec![2].into()).await;
+                cache.write().await.put("k3", vec![3].into()).await;
+                cache.write().await.put("k4", vec![4].into()).await;
             }));
         }
         for t in threads {
             t.await.unwrap();
         }
-        assert_eq!(arc_cache.get_total_size(), 2);
+        assert_eq!(arc_cache.read().await.get_total_size(), 2);
     }
 
     #[tokio::test]
     async fn cache_stream_size_valid() {
-        let lru_cache = new_lru_redis_cache!(TEST_CACHE_DIR, 3, new_redis_client(), "stream_cache");
+        let mut lru_cache =
+            new_lru_redis_cache!(TEST_CACHE_DIR, 3, new_redis_client(), "stream_cache");
         let bytes: Bytes = Bytes::from(vec![1, 1, 4]);
         let stream = stream::iter(vec![Ok(bytes.clone())]);
         let stream: Box<dyn Stream<Item = Result<Bytes>> + Send + Unpin> = Box::new(stream);
@@ -1274,7 +1316,7 @@ mod tests {
     #[tokio::test]
     async fn test_ttl_redis_cache_expire_key() {
         setup();
-        let cache = new_ttl_redis_cache!(TEST_CACHE_DIR, 1, new_redis_client(), "ttl_simple");
+        let mut cache = new_ttl_redis_cache!(TEST_CACHE_DIR, 1, new_redis_client(), "ttl_simple");
         cache_put!(cache, "key", vec![1].into());
         assert_eq!(cache_get!(cache, "key").unwrap().to_vec().await, vec![1]);
         util::sleep_ms(4000);
@@ -1284,7 +1326,7 @@ mod tests {
     #[tokio::test]
     async fn ttl_sled_cache_expire_key() {
         setup();
-        let cache = new_ttl_sled_cache!(
+        let mut cache = new_ttl_sled_cache!(
             &format!("{}/sled_no_dup", TEST_CACHE_DIR),
             1,
             "ttl_sled_no_dup",

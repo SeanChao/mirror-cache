@@ -1,7 +1,7 @@
 #!/bin/zx
 $.quote = v => v
 
-import { pip_install, clean } from './lib.mjs'
+import { pip_install } from './lib.mjs'
 
 const config = {
 	'exec': 'cargo run',
@@ -17,7 +17,6 @@ try {
 	])
 	// begin tests
 	// test - pip, uncached
-	await $`${clean()}`
 	const pkg1 = '0==0.0.0'
 	await $`${pip_install(pkg1, config.mirror)}`
 	// test - pip, cached removed

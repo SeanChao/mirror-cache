@@ -1,5 +1,7 @@
 use config::ConfigError;
 use redis::RedisError;
+use rusoto_core::RusotoError;
+use rusoto_s3::{CreateBucketError, DeleteObjectError, GetObjectError};
 use std::convert::From;
 use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
@@ -29,6 +31,12 @@ pub enum Error {
     IoError(std::io::Error),
     #[error("{0}")]
     OtherError(String),
+    #[error("failed to get rusoto object: {0}")]
+    RusotoGetObjectError(RusotoError<GetObjectError>),
+    #[error("failed to delete rusoto object: {0}")]
+    RusotoDeleteObjectError(RusotoError<DeleteObjectError>),
+    #[error("faield to crate bucket: {0}")]
+    RusotoCreateBucketError(RusotoError<CreateBucketError>),
 }
 
 impl warp::reject::Reject for Error {}
@@ -54,5 +62,23 @@ impl From<std::io::Error> for Error {
 impl From<sled::transaction::UnabortableTransactionError> for Error {
     fn from(e: sled::transaction::UnabortableTransactionError) -> Error {
         Error::SledUnabortableTransactionError(e)
+    }
+}
+
+impl From<RusotoError<CreateBucketError>> for Error {
+    fn from(e: RusotoError<CreateBucketError>) -> Error {
+        Error::RusotoCreateBucketError(e)
+    }
+}
+
+impl From<RusotoError<GetObjectError>> for Error {
+    fn from(e: RusotoError<GetObjectError>) -> Error {
+        Error::RusotoGetObjectError(e)
+    }
+}
+
+impl From<RusotoError<DeleteObjectError>> for Error {
+    fn from(e: RusotoError<DeleteObjectError>) -> Error {
+        Error::RusotoDeleteObjectError(e)
     }
 }
