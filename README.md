@@ -25,10 +25,11 @@ A reverse proxy supporting multiple cache policies, customized rules, configurat
 
 ## Features
 
-- Cache your dependencies on limited disk space with LRU/TTL cache policies
+- Cache your dependencies in limited space with LRU/TTL cache policies
 - Reload updated config without restarting the program
 - Support customized rules
 - Expose metrics like cache hit rate per rule, task count and more
+- Support multiple storage backend (memory, local filesystem and S3)
 
 ## Quick start
 

@@ -59,10 +59,26 @@ Policies are an array of customized cache policies.
 
 - `name`: the **unique** name of the policy. Used in database key spaces and metrics to identify the policy in a user-friendly way.
 - `type`: the type of the policy, see [Cache Policies](#cache-policies) for details
-- `path`: the path of cached data
 - `metadata_db`: the metadata database to use: `redis` or `sled`. See [Cache Policies](#cache-policies) for details
+- `storage`: the `name` of storage to use. See [Storage](#storage) for details
 
 For other policy-specific options, see [Cache Policies](#cache-policies) for details.
+
+#### Storages
+
+`storages` is an array of storage backends.
+
+- `name`: the **unique** name of the storage. Used in policies to identify the storage in a user-friendly way.
+- `type`: the type of the storage.
+  - `MEM`: temporary in-mem storage (`config: Mem`)
+  - `FS`: local filesystem. (`config: Fs`)
+    - `path`: the path of cached data
+  - `S3`: S3 (Simple Storage Service) storage (`config: S3`)
+    - `endpoint`: the endpoint of S3
+    - `bucket`: the bucket name
+    
+    For S3 authentication, just export the environment variables `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (We use the default `rusoto_s3` authentication, please checkout its documents).
+- `config`: the configuration of storage. The config starts with a config key (unique for each `type`), its value is a map of avaliable options for that `type`. See above for config key and avaliable options.
 
 ### Hot reloading
 
