@@ -56,7 +56,6 @@ impl Storage {
             ),
             Storage::S3 { endpoint, bucket } => {
                 let client = new_s3_client(endpoint);
-                // client.re
                 let output = client
                     .get_object(rusoto_s3::GetObjectRequest {
                         bucket: bucket.clone(),
@@ -67,7 +66,6 @@ impl Storage {
                 let rusoto_stream = output.body.unwrap();
                 Ok(CacheData::ByteStream(
                     Box::new(rusoto_stream.map_err(Error::IoError)),
-                    // Some(output.content_length as u64),
                     output.content_length.map(|x| x as CacheSizeType),
                 ))
             }

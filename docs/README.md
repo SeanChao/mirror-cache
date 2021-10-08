@@ -117,7 +117,7 @@ Avaliable options in `policy`:
 
 #### Redis Caveats
 
-> Note: To use this cache policy, please enable redis keyspace notifications and enable notifications for key expirations, that is: `notify-keyspace-events Kx`. See [redis.conf](../redis.conf) for reference.
+To use this cache policy, please enable redis keyspace notifications and enable notifications for key expirations, that is: `notify-keyspace-events Kx`.
 
 The policy is implemented on top of the redis command `EXPIRE`.
 A cache hit happens if the program can `GET` cache key from redis. Otherwise a cache miss happens, and the program then `put` the cache entry.
