@@ -14,10 +14,15 @@ pub fn now_nanos() -> i64 {
     chrono::offset::Local::now().timestamp_nanos()
 }
 
-pub async fn make_request(url: &str) -> Result<reqwest::Response> {
+pub async fn make_request(url: &str, head: bool) -> Result<reqwest::Response> {
     increment_counter!(metric::CNT_OUT_REQUESTS);
     let client = ClientBuilder::new().build().unwrap();
-    let resp = client.get(url).send().await;
+    let req = if !head {
+        client.get(url)
+    } else {
+        client.head(url)
+    };
+    let resp = req.send().await;
     match resp {
         Ok(res) => {
             debug!("outbound request: {:?} {:?}", res.status(), res.headers());

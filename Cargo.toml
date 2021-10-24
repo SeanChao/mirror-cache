@@ -1,6 +1,6 @@
 [package]
 name = "mirror-cache"
-version = "0.0.4"
+version = "0.1.0"
 edition = "2018"
 authors = ["SeanChao <seanchao0804@gmail.com>"]
 repository = "https://github.com/SeanChao/mirror-cache"

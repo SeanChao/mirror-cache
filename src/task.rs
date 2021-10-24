@@ -128,7 +128,7 @@ impl TaskManager {
             "[Request] [MISS] {:?}, fetching from upstream: {}",
             &task, &remote_url
         );
-        let resp = util::make_request(&remote_url).await;
+        let resp = util::make_request(&remote_url, false).await;
         match resp {
             Ok(res) => {
                 if !res.status().is_success() {
@@ -335,7 +335,7 @@ impl TaskManager {
         let task_list_ptr = self.task_set.clone();
         // spawn an async download task
         tokio::spawn(async move {
-            let resp = util::make_request(&upstream_url).await;
+            let resp = util::make_request(&upstream_url, false).await;
             match resp {
                 Ok(res) => {
                     if res.status().is_success() {

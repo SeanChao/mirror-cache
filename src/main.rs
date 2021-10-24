@@ -191,13 +191,23 @@ mod filters {
             );
         });
 
-        fallback().with(log)
+        fallback_head().or(fallback().with(log))
+    }
+
+    fn fallback_head() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+        warp::head()
+            .and(
+                warp::path::tail().map(|tail: warp::filters::path::Tail| tail.as_str().to_string()),
+            )
+            .and_then(handlers::head_fallback_handler)
     }
 
     /// fallback handler, matches all paths
     fn fallback() -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        warp::path::tail()
-            .map(|tail: warp::filters::path::Tail| tail.as_str().to_string())
+        warp::get()
+            .and(
+                warp::path::tail().map(|tail: warp::filters::path::Tail| tail.as_str().to_string()),
+            )
             .and_then(handlers::fallback_handler)
     }
 }
@@ -210,35 +220,56 @@ mod handlers {
     use warp::Rejection;
     use warp::Reply;
 
+    pub async fn head_fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
+        // resolve path to upstream url
+        let resolve_result = resolve_upstream(&path).await;
+        if resolve_result.is_none() {
+            return Err(warp::reject::not_found());
+        }
+        let upstream = resolve_result.unwrap().0;
+        match util::make_request(&upstream, true).await {
+            Ok(up_resp) => {
+                // create a response and copy headers
+                let resp_builder = up_resp
+                    .headers()
+                    .iter()
+                    .fold(warp::http::Response::builder(), |prev, (key, value)| {
+                        prev.header(key, value)
+                    });
+                Ok(resp_builder.body("").unwrap())
+            }
+            Err(e) => match e {
+                Error::UpstreamRequestError(res) => {
+                    let resp = warp::http::Response::builder()
+                        .status(res.status())
+                        .body("");
+                    Ok(resp.unwrap())
+                }
+                _ => Err(warp::reject::custom(e)),
+            },
+        }
+    }
+
     pub async fn fallback_handler(path: String) -> Result<impl warp::Reply, Rejection> {
-        // Dynamically dispatch tasks defined in config file
-        let tm = TASK_MANAGER.read().await.clone();
-        let config = &tm.config;
-        let rules_regex_set_list = RE_SET_LIST.read().await;
-        let matched_indices: Vec<usize> =
-            rules_regex_set_list.0.matches(&path).into_iter().collect();
-        if matched_indices.is_empty() {
-            // No matching rule
+        let upstream = resolve_upstream(&path).await;
+        if upstream.is_none() {
             return Err(warp::reject());
         }
-        let idx = *matched_indices.first().unwrap();
-        let re = &rules_regex_set_list.1[idx];
-        let rule = config.rules.get(idx).unwrap();
-        let upstream = rule.upstream.clone();
+        let (upstream, idx, rule) = upstream.unwrap();
         trace!("matched by rule #{}: {}", idx, &rule.path);
-        increment_counter!(metric::COUNTER_REQ, "rule" => rule_label(rule));
-        let replaced = re.replace_all(&path, &upstream);
+        increment_counter!(metric::COUNTER_REQ, "rule" => rule_label(&rule));
         let task = Task {
             rule_id: idx,
-            url: String::from(replaced),
+            url: upstream,
         };
+        let tm = TASK_MANAGER.read().await.clone();
         let tm_resp = tm.resolve_task(&task).await;
         match tm_resp.1 {
             CacheHitMiss::Hit => {
-                increment_counter!(metric::COUNTER_CACHE_HIT, "rule" => rule_label(rule))
+                increment_counter!(metric::COUNTER_CACHE_HIT, "rule" => rule_label(&rule))
             }
             CacheHitMiss::Miss => {
-                increment_counter!(metric::COUNTER_CACHE_MISS, "rule" => rule_label(rule))
+                increment_counter!(metric::COUNTER_CACHE_MISS, "rule" => rule_label(&rule))
             }
         };
         match tm_resp.0 {
@@ -250,11 +281,11 @@ mod handlers {
                             .into_response();
                     }
                 }
-                increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
+                increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(&rule));
                 Ok(resp)
             }
             Err(e) => {
-                increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(rule));
+                increment_counter!(metric::COUNTER_REQ_FAILURE, "rule" => rule_label(&rule));
                 match e {
                     Error::UpstreamRequestError(res) => {
                         let resp = warp::http::Response::builder()
@@ -267,6 +298,27 @@ mod handlers {
                 }
             }
         }
+    }
+
+    /// Dynamically resolve upstream url as defined in config file
+    async fn resolve_upstream(path: &str) -> Option<(String, usize, Rule)> {
+        let tm = TASK_MANAGER.read().await.clone();
+        let config = &tm.config;
+        let rules_regex_set_list = RE_SET_LIST.read().await;
+        let matched_indices: Vec<usize> =
+            rules_regex_set_list.0.matches(path).into_iter().collect();
+        if matched_indices.is_empty() {
+            // No matching rule
+            return None;
+        }
+        let idx = *matched_indices.first().unwrap();
+        let re = &rules_regex_set_list.1[idx];
+        let rule = config.rules.get(idx).unwrap();
+        let upstream = rule.upstream.clone();
+        trace!("matched by rule #{}: {}", idx, &rule.path);
+        increment_counter!(metric::COUNTER_REQ, "rule" => rule_label(rule));
+        let replaced = re.replace_all(path, &upstream);
+        Some((String::from(replaced), idx, rule.clone()))
     }
 }
 
