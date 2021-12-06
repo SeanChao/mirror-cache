@@ -2,7 +2,7 @@ port: 9000
 metrics_port: 9001
 # log level: error / warn / info / debug / trace, default level is info
 log_level: info
-hot_reload: false
+hot_reload: true
 
 redis:
   url: redis://localhost
@@ -47,9 +47,26 @@ rules:
     policy: "policy_lru"
 
   # Ubuntu
-  - path: "ubuntu/dists/(.*)"
+  - path: "ubuntu/indices/(.*)"
+    upstream: "http://archive.ubuntu.com/ubuntu/indices/$1"
     policy: "policy_ubuntu"
-    upstream: "http://archive.ubuntu.com/ubuntu/dists/$1"
+
+   # git for Linux 
+  - path: "git/(.*)"
+    upstream: "https://mirrors.edge.kernel.org/pub/software/scm/git/$1"
+    policy: "policy_ubuntu"
+
+  # GitHub-Releases
+  - name: GitHub Home
+    path: "/github-releases/"
+    upstream: "https://github.com/"
+    policy: "policy_ttl_60"
+  
+  - name: Package Version
+    path: "/github-releases/git-for-windows/git/releases/download/v2.34.1.windows.1/Git-2.34.1-64-bit.exe"
+    size_limit: 1 GB
+    upstream: "https://github.com/git-for-windows/git/releases/download/v2.34.1.windows.1/Git-2.34.1-64-bit.exe"    
+    policy: "policy_ttl_60"
 
 policies:
   - name: policy_ttl_60
@@ -68,6 +85,8 @@ policies:
     metadata_db: sled
     storage: local-fs
     size: 128 MB
+    storage: local-fs
+    size: 256 MB
 
 storages:
   - name: local-fs
