@@ -2,7 +2,7 @@ port: 9000
 metrics_port: 9001
 # log level: error / warn / info / debug / trace, default level is info
 log_level: info
-hot_reload: true
+hot_reload: false
 
 redis:
   url: redis://localhost
@@ -11,61 +11,16 @@ sled:
   metadata_path: cache/sled_metadata
 
 rules:
-  # PyPI index
-  - name: PyPI index
-    path: "pypi/simple"
-    upstream: "https://pypi.org/simple"
-    rewrite:
-      - from: "https://files.pythonhosted.org/"
-        to: "http://localhost:9000/pypi/"
-    policy: "policy_ttl_60"
-    options:
-      content_type: "text/html"
-  # PyPI packages
-  - name: PyPI packages
-    path: "pypi/packages/"
-    size_limit: 1 GB
-    upstream: "https://files.pythonhosted.org/packages/"
-    policy: "policy_lru"
-
-  # Anaconda index [main]
-  - path: "anaconda/pkgs/main/(.*repodata.json(.bz2)?)"
-    upstream: "https://repo.anaconda.com/pkgs/main/$1"
-    policy: "policy_ttl_60"
-  # Anaconda packages [main]
-  - path: "anaconda/pkgs/main"
-    upstream: "https://repo.anaconda.com/pkgs/main"
-    policy: "policy_lru"
-
-  # Anaconda cloud index
-  - path: "anaconda/cloud/(.*repodata.json(.bz2)?)"
-    upstream: "https://conda.anaconda.org/$1"
-    policy: "policy_ttl_60"
-  # Anaconda cloud packages
-  - path: "anaconda/cloud/"
-    upstream: "https://conda.anaconda.org/"
-    policy: "policy_lru"
-
-  # Ubuntu
-  - path: "ubuntu/indices/(.*)"
-    upstream: "http://archive.ubuntu.com/ubuntu/indices/$1"
-    policy: "policy_ubuntu"
-
-   # git for Linux 
-  - path: "git/(.*)"
-    upstream: "https://mirrors.edge.kernel.org/pub/software/scm/git/$1"
-    policy: "policy_ubuntu"
-
   # GitHub-Releases
   - name: GitHub Home
     path: "/github-releases/"
     upstream: "https://github.com/"
     policy: "policy_ttl_60"
-  
+
   - name: Package Version
     path: "/github-releases/git-for-windows/git/releases/download/v2.34.1.windows.1/Git-2.34.1-64-bit.exe"
     size_limit: 1 GB
-    upstream: "https://github.com/git-for-windows/git/releases/download/v2.34.1.windows.1/Git-2.34.1-64-bit.exe"    
+    upstream: "https://github.com/git-for-windows/git/releases/download/v2.34.1.windows.1/Git-2.34.1-64-bit.exe"
     policy: "policy_ttl_60"
 
 policies:
@@ -85,8 +40,6 @@ policies:
     metadata_db: sled
     storage: local-fs
     size: 128 MB
-    storage: local-fs
-    size: 256 MB
 
 storages:
   - name: local-fs
