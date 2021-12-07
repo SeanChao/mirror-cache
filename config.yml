@@ -47,9 +47,15 @@ rules:
     policy: "policy_lru"
 
   # Ubuntu
-  - path: "ubuntu/dists/(.*)"
+  - path: "ubuntu/indices/(.*)"
+    upstream: "http://archive.ubuntu.com/ubuntu/indices/$1"
     policy: "policy_ubuntu"
-    upstream: "http://archive.ubuntu.com/ubuntu/dists/$1"
+
+  # GitHub-Releases
+  - name: GitHub Home
+    path: "/github-releases/"
+    upstream: "https://github.com/"
+    policy: "policy_lru"
 
 policies:
   - name: policy_ttl_60
