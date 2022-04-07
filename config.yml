@@ -11,6 +11,12 @@ sled:
   metadata_path: cache/sled_metadata
 
 rules:
+  # IPFS
+  - name: IPFS
+    path: "ipfs/"
+    size_limit: 1 GB
+    upstream: "https://ipfs.io/ipfs/"
+    policy: "policy_lru"
   # PyPI index
   - name: PyPI index
     path: "pypi/simple"
