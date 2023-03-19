@@ -21,7 +21,7 @@
 
 A reverse proxy supporting multiple cache policies, customized rules, configuration hot reloading. For mirror sites and also personal users!
 
-[docs](docs/README.md) | [demo server](https://mirrors.seanchao.xyz)
+[docs](docs/README.md)
 
 ## Features
 
